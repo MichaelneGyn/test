@@ -842,13 +842,49 @@ async def ajuda(ctx):
         inline=False
     )
     
-    # Social
+    # Moderação
     embed.add_field(
-        name="🎯 Social",
-        value="`f`, `familia`, `avatar`, `perfil`, `rep`, `sobremim`",
+        name="👮 Moderação",
+        value="`warn`, `ban`, `kick`, `mute`, `unmute`, `lock`, `unlock`, `castigar`, `nuke`, `bangif`, `mutecall`, `unmutecall`, `removeadvertence`, `removecastigo`, `removerole`, `unban`, `unbanall`, `advertence`",
         inline=False
     )
     
+    # Social
+    embed.add_field(
+        name="🎯 Social",
+        value="`avatar`, `perfil`, `rep`, `sobremim`, `influencer`, `tellonym`",
+        inline=False
+    )
+    
+    # Staff
+    embed.add_field(
+        name="🧩 Staff",
+        value="`migracoes`, `migrar`, `movchat`, `mov`, `movpoints`, `recrutamentos`, `recrutar`, `register`, `registers`, `tempo`, `verificar`, `resetmigs`, `resetmovs`, `resetrecs`, `resetregisters`, `resettime`, `resetverificacoes`",
+        inline=False
+    )
+    
+    # Utilitários
+    embed.add_field(
+        name="🔱 Utilitários",
+        value="`cl`, `clear`, `membersrole`",
+        inline=False
+    )
+    
+    # VIP
+    embed.add_field(
+        name="⭐ VIP",
+        value="`familia`, `f`, `addfamily`, `removefamily`, `addvip`, `addvipc`, `removevip`, `removevipc`, `setvip`",
+        inline=False
+    )
+    
+    # Integrações
+    embed.add_field(
+        name="🔗 Integrações",
+        value="`instagram`, `insta`, `ig`, `tellonym`",
+        inline=False
+    )
+    
+    embed.set_footer(text="Use ! antes de cada comando • Total: 62+ comandos")
     await ctx.send(embed=embed)
 
 @bot.command(name='botinfo')
