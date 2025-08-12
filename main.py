@@ -502,15 +502,75 @@ async def familia_panel(ctx):
     panel_cooldown[channel_id] = current_time
     
     embed = discord.Embed(
-        title="👨‍👩‍👧‍👦 Painel de Famílias",
-        description="Gerencie sua família através dos botões abaixo:",
+        title="🤖 Painel Principal do Bot",
+        description="Acesse todas as funcionalidades através dos botões abaixo:",
         color=0x3498db
     )
-    embed.add_field(name="➕ Criar", value="Criar uma nova família", inline=True)
-    embed.add_field(name="🚪 Entrar", value="Entrar em uma família existente", inline=True)  
-    embed.add_field(name="ℹ️ Info", value="Ver informações da sua família", inline=True)
-    embed.add_field(name="❌ Sair", value="Deixar sua família atual", inline=True)
-    embed.set_footer(text="Este painel expira em 5 minutos")
+    
+    # Aparência
+    embed.add_field(
+        name="🎭 Aparência",
+        value="`andar`, `setavatar`, `setbanner`, `setusername`",
+        inline=False
+    )
+    
+    # Economia
+    embed.add_field(
+        name="💸 Economia",
+        value="`carteira`, `daily`, `depositar`, `empregos`, `trabalhar`",
+        inline=False
+    )
+    
+    # Primeira Dama
+    embed.add_field(
+        name="💍 Primeira Dama",
+        value="`pd`",
+        inline=False
+    )
+    
+    # Informativo
+    embed.add_field(
+        name="❗ Informativo",
+        value="`ajuda`, `botinfo`, `ping`",
+        inline=False
+    )
+    
+    # Moderação
+    embed.add_field(
+        name="👮 Moderação",
+        value="`warn`, `ban`, `kick`, `mute`, `lock`, `nuke`, `castigar`",
+        inline=False
+    )
+    
+    # Social
+    embed.add_field(
+        name="🎯 Social",
+        value="`avatar`, `perfil`, `rep`, `sobremim`, `influencer`, `tellonym`",
+        inline=False
+    )
+    
+    # Staff
+    embed.add_field(
+        name="🧩 Staff",
+        value="`migrar`, `recrutar`, `register`, `tempo`, `verificar`",
+        inline=False
+    )
+    
+    # VIP e Famílias
+    embed.add_field(
+        name="⭐ VIP & Famílias",
+        value="`familia`, `addvip`, `addfamily` - Use os botões abaixo!",
+        inline=False
+    )
+    
+    # Integrações
+    embed.add_field(
+        name="🔗 Integrações",
+        value="`instagram`, `tellonym`",
+        inline=False
+    )
+    
+    embed.set_footer(text="Use ! antes de cada comando • Este painel expira em 5 minutos")
     
     view = FamiliaView()
     message = await ctx.send(embed=embed, view=view)
