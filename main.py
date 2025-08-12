@@ -196,6 +196,80 @@ async def check_mod(ctx):
     return ctx.author.guild_permissions.manage_messages
 
 # ================= FAMILY SYSTEM =================
+class HelpCategoryView(View):
+    def __init__(self):
+        super().__init__(timeout=300)  # 5 minutes timeout
+        
+    @discord.ui.button(label="Informação", style=discord.ButtonStyle.primary, emoji="ℹ️")
+    async def informacao(self, interaction: discord.Interaction, button: Button):
+        embed = discord.Embed(
+            title="ℹ️ Comandos Informativos",
+            description="Comandos para obter informações:",
+            color=0x3498db
+        )
+        embed.add_field(name="Comandos:", value="`ajuda`, `botinfo`, `ping`", inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        
+    @discord.ui.button(label="Moderação", style=discord.ButtonStyle.danger, emoji="🛡️")
+    async def moderacao(self, interaction: discord.Interaction, button: Button):
+        embed = discord.Embed(
+            title="🛡️ Comandos de Moderação",
+            description="Comandos para moderação do servidor:",
+            color=0xff0000
+        )
+        embed.add_field(name="Comandos:", value="`warn`, `ban`, `kick`, `mute`, `unmute`, `lock`, `unlock`, `castigar`, `nuke`, `bangif`, `mutecall`, `unmutecall`, `removeadvertence`, `removecastigo`, `removerole`, `unban`, `unbanall`, `advertence`", inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        
+    @discord.ui.button(label="Economia", style=discord.ButtonStyle.success, emoji="💰")
+    async def economia(self, interaction: discord.Interaction, button: Button):
+        embed = discord.Embed(
+            title="💰 Sistema Econômico",
+            description="Comandos do sistema de economia:",
+            color=0x00ff00
+        )
+        embed.add_field(name="Comandos:", value="`carteira`, `daily`, `depositar`, `empregos`, `trabalhar`", inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        
+    @discord.ui.button(label="Diversão", style=discord.ButtonStyle.secondary, emoji="🎉")
+    async def diversao(self, interaction: discord.Interaction, button: Button):
+        embed = discord.Embed(
+            title="🎉 Comandos de Entretenimento",
+            description="Comandos divertidos e sociais:",
+            color=0x9b59b6
+        )
+        embed.add_field(name="Comandos:", value="`andar`, `avatar`, `perfil`, `rep`, `sobremim`, `influencer`, `tellonym`, `instagram`", inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        
+    @discord.ui.button(label="Utilidade", style=discord.ButtonStyle.primary, emoji="🔧")
+    async def utilidade(self, interaction: discord.Interaction, button: Button):
+        embed = discord.Embed(
+            title="🔧 Ferramentas Úteis",
+            description="Comandos utilitários e de staff:",
+            color=0x3498db
+        )
+        embed.add_field(name="Comandos:", value="`cl`, `clear`, `membersrole`, `migrar`, `recrutar`, `register`, `registers`, `tempo`, `verificar`, `setavatar`, `setbanner`, `setusername`", inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="VIP", style=discord.ButtonStyle.primary, emoji="⭐", row=1)
+    async def vip(self, interaction: discord.Interaction, button: Button):
+        embed = discord.Embed(
+            title="⭐ Comandos VIP",
+            description="Comandos exclusivos para VIP:",
+            color=0xffd700
+        )
+        embed.add_field(name="Comandos:", value="`familia`, `addfamily`, `removefamily`, `addvip`, `addvipc`, `removevip`, `removevipc`, `setvip`", inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        
+    @discord.ui.button(label="PrimDama", style=discord.ButtonStyle.secondary, emoji="👑", row=1)
+    async def primdama(self, interaction: discord.Interaction, button: Button):
+        embed = discord.Embed(
+            title="👑 Comandos da Primeira Dama",
+            description="Comandos exclusivos da Primeira Dama:",
+            color=0x9b59b6
+        )
+        embed.add_field(name="Comandos:", value="`pd`", inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
 class FamiliaView(View):
     def __init__(self):
         super().__init__(timeout=300)
@@ -502,77 +576,62 @@ async def familia_panel(ctx):
     panel_cooldown[channel_id] = current_time
     
     embed = discord.Embed(
-        title="🤖 Painel Principal do Bot",
-        description="Acesse todas as funcionalidades através dos botões abaixo:",
+        title="🔧 PAINEL DE AJUDA FOLK APP",
+        description="Escolha uma categoria de comandos:",
         color=0x3498db
     )
     
-    # Aparência
     embed.add_field(
-        name="🎭 Aparência",
-        value="`andar`, `setavatar`, `setbanner`, `setusername`",
+        name="📚 Categorias Disponíveis:",
+        value="",
         inline=False
     )
     
-    # Economia
     embed.add_field(
-        name="💸 Economia",
-        value="`carteira`, `daily`, `depositar`, `empregos`, `trabalhar`",
-        inline=False
+        name="ℹ️ Informação",
+        value="→ Comandos informativos",
+        inline=True
     )
     
-    # Primeira Dama
     embed.add_field(
-        name="💍 Primeira Dama",
-        value="`pd`",
-        inline=False
+        name="🛡️ Moderação",
+        value="→ Comandos de moderação",
+        inline=True
     )
     
-    # Informativo
     embed.add_field(
-        name="❗ Informativo",
-        value="`ajuda`, `botinfo`, `ping`",
-        inline=False
+        name="🎉 Diversão",
+        value="→ Comandos de entretenimento",
+        inline=True
     )
     
-    # Moderação
     embed.add_field(
-        name="👮 Moderação",
-        value="`warn`, `ban`, `kick`, `mute`, `lock`, `nuke`, `castigar`",
-        inline=False
+        name="🔧 Utilidade",
+        value="→ Ferramentas úteis",
+        inline=True
     )
     
-    # Social
     embed.add_field(
-        name="🎯 Social",
-        value="`avatar`, `perfil`, `rep`, `sobremim`, `influencer`, `tellonym`",
-        inline=False
+        name="💰 Economia",
+        value="→ Sistema econômico",
+        inline=True
     )
     
-    # Staff
     embed.add_field(
-        name="🧩 Staff",
-        value="`migrar`, `recrutar`, `register`, `tempo`, `verificar`",
-        inline=False
+        name="⭐ VIP",
+        value="→ Comandos exclusivos VIP",
+        inline=True
     )
     
-    # VIP e Famílias
     embed.add_field(
-        name="⭐ VIP & Famílias",
-        value="`familia`, `addvip`, `addfamily` - Use os botões abaixo!",
-        inline=False
+        name="👑 PrimDama",
+        value="→ Comandos da Primeira Dama",
+        inline=True
     )
     
-    # Integrações
-    embed.add_field(
-        name="🔗 Integrações",
-        value="`instagram`, `tellonym`",
-        inline=False
-    )
+    embed.set_footer(text=f"FOLK APP • {datetime.now().strftime('%d/%m/%Y %H:%M')}")
     
-    embed.set_footer(text="Use ! antes de cada comando • Este painel expira em 5 minutos")
-    
-    view = FamiliaView()
+    view = HelpCategoryView()
     message = await ctx.send(embed=embed, view=view)
     
     # Store the message to prevent duplicates
