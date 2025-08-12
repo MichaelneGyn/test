@@ -1,0 +1,3408 @@
+# ================= IMPORTS OTIMIZADOS =================
+import discord
+from discord.ext import commands, tasks
+from discord.ui import Button, View, Modal, TextInput, Select
+import os
+import sys
+import sqlite3
+import asyncio
+import random
+import logging
+import aiohttp
+import time
+from datetime import timedelta, datetime, timezone
+from discord.ext.commands import BucketType
+from pathlib import Path
+from dotenv import load_dotenv
+import collections
+import threading
+
+
+
+
+# =============== SISTEMA ANTI-DUPLICAÇÃO DE COMANDOS ===============
+class SafeBot(commands.Bot):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._registered_commands = set()
+
+    def safe_command(self, name: str, **kwargs):
+        """Decorator seguro para comandos"""
+        def decorator(func):
+            if name in self._registered_commands:
+                print(f'⚠️ Comando "{name}" já registrado. Ignorando duplicata.')
+                return func
+            self._registered_commands.add(name)
+            return commands.command(name=name, **kwargs)(func)
+        return decorator
+
+# ================= CONFIGURAÇÕES GLOBAIS E LOGS =================
+LAST_WALLET_MESSAGES = {}
+
+# Configuração avançada de logging com arquivo
+import logging
+from logging.handlers import RotatingFileHandler
+
+# Cria logger principal
+logger_main = logging.getLogger('BotDebug')
+logger_main.setLevel(logging.DEBUG)
+
+# Handler para arquivo rotativo (máx 5MB, 3 backups)
+log_path = Path(__file__).parent / "bot_debug.log"
+file_handler = RotatingFileHandler(log_path, maxBytes=5*1024*1024, backupCount=3, encoding='utf-8')
+file_handler.setLevel(logging.DEBUG)
+
+# Handler para console
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+
+# Formatação detalhada
+detailed_formatter = logging.Formatter(
+    '%(asctime)s - %(name)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s'
+)
+file_handler.setFormatter(detailed_formatter)
+console_handler.setFormatter(detailed_formatter)
+
+
+# Dicionário para rastrear execuções de comandos
+command_executions = collections.defaultdict(list)
+duplicate_alerts = {}
+
+def log_command_execution(command_name, user_id, context):
+    """Registra execução de comando para detectar duplicações"""
+    current_time = datetime.now()
+    
+    # Adiciona execução à lista
+    command_executions[f"{command_name}_{user_id}"].append({
+        'timestamp': current_time,
+        'context': context,
+        'channel_id': getattr(context, 'channel_id', 'unknown'),
+        'message_id': getattr(context, 'message_id', 'unknown')
+    })
+    
+    # Limpa execuções antigas (mais de 1 minuto)
+    cutoff_time = current_time - timedelta(minutes=1)
+    command_executions[f"{command_name}_{user_id}"] = [
+        exec_data for exec_data in command_executions[f"{command_name}_{user_id}"]
+        if exec_data['timestamp'] > cutoff_time
+    ]
+
+class BotLogger:
+    @staticmethod
+    def error(message):
+        logging.error(f"❌ {message}")
+
+    @staticmethod
+    def debug(message):
+        logging.debug(f"🔧 {message}")
+
+    @staticmethod
+    def command_success(command, user, details=""):
+        logging.info(f"✅ Comando '{command}' executado por {user} {details}")
+
+    @staticmethod
+    def command_error(command, user, error):
+        logging.error(f"❌ Comando '{command}' falhou para {user}: {error}")
+
+logger = BotLogger()
+
+# ================= CONFIGURAÇÃO DO BOT =================
+intents = discord.Intents.default()
+intents.members = True
+intents.message_content = True
+intents.presences = True
+intents.voice_states = True
+
+bot = SafeBot(command_prefix='!', intents=intents, help_command=None)
+
+# --- SISTEMA DE PERMISSÕES AUTO-CONFIGURÁVEL ---
+CONFIG_DB_PATH = Path(__file__).parent / "perm_config.db"
+
+def init_perm_db():
+    """Inicializa o banco de dados de permissões"""
+    with sqlite3.connect(CONFIG_DB_PATH) as conn:
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS server_config (
+            server_id INTEGER PRIMARY KEY,
+            admin_role_id INTEGER DEFAULT NULL,
+            mod_role_id INTEGER DEFAULT NULL,
+            dono_bot_role_id INTEGER DEFAULT NULL,
+            pd_role_id INTEGER DEFAULT NULL
+        )""")
+        conn.commit()
+
+async def check_admin(ctx):
+    """Verifica se o usuário tem permissão de administrador"""
+    if await ctx.bot.is_owner(ctx.author):
+        return True
+    
+    with sqlite3.connect(CONFIG_DB_PATH) as conn:
+        config = conn.execute(
+            "SELECT admin_role_id, dono_bot_role_id FROM server_config WHERE server_id = ?",
+            (ctx.guild.id,)
+        ).fetchone()
+        
+    if config:
+        admin_role = ctx.guild.get_role(config[0]) if config[0] else None
+        dono_role = ctx.guild.get_role(config[1]) if config[1] else None
+        return any(role in ctx.author.roles for role in [admin_role, dono_role] if role)
+    
+    return ctx.author.guild_permissions.administrator
+
+# ADICIONE O COMANDO SETUP AQUI
+@bot.command(name='setup')
+@commands.check(check_admin)
+async def setup_bot(ctx, tipo: str, role: discord.Role):
+    """Configura os cargos de permissão
+
+    Tipos: admin, mod, dono, pd
+    Exemplo: !setup admin @Administradores
+    """
+    valid_types = ['admin', 'mod', 'dono', 'pd']
+    if tipo.lower() not in valid_types:
+        return await ctx.send(f"❌ Tipo inválido! Use: {', '.join(valid_types)}")
+
+TEST_MODE = False  # Alterado para False para usar SQLite real
+
+if TEST_MODE:
+    test_db = {
+        'users': {},
+        'warns': [],
+        'families': [],
+        'staff': []
+    }
+
+# ================= BANCO DE DADOS SQLITE =================
+
+# Configuração do banco de dados com verificação de permissões
+DB_PATH = Path(__file__).parent / "config.db"
+
+# Garante que a pasta database existe e tem permissões
+try:
+    DB_PATH.parent.mkdir(exist_ok=True, parents=True)
+    # Verifica/cria o arquivo do banco de dados
+    if not DB_PATH.exists():
+        with open(DB_PATH, 'w'): pass  # Cria arquivo vazio
+except Exception as e:
+    print(f"Erro ao configurar banco de dados: {e}")
+    # Fallback para local temporário se não tiver permissão
+    DB_PATH = Path(os.getenv('TEMP', '/temp')) / "bot_data_fallback.db"
+    print(f"Usando caminho alternativo: {DB_PATH}")
+
+def get_db():
+    if TEST_MODE:
+        return test_db
+    
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row  # Isso permite acesso por nome de coluna
+        conn.execute("PRAGMA foreign_keys = ON")
+        return conn
+    except sqlite3.Error as e:
+        print(f"Erro ao conectar ao banco de dados: {e}")
+        raise
+
+def init_db():
+    global DB_PATH
+    print(f"Inicializando banco de dados em: {DB_PATH}")
+    
+    if TEST_MODE:
+        return
+    
+    success = False
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        
+        # Criação das tabelas
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            money INTEGER DEFAULT 0,
+            bank INTEGER DEFAULT 0,
+            rep INTEGER DEFAULT 0,
+            xp INTEGER DEFAULT 0,
+            level INTEGER DEFAULT 1,
+            last_daily TEXT,
+            last_rep TEXT,
+            about_me TEXT,
+            vip INTEGER DEFAULT 0,
+            vip_level INTEGER DEFAULT 0,
+            family_id INTEGER
+        )
+        """)
+        
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS warns (
+            warn_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            moderator_id INTEGER,
+            reason TEXT,
+            timestamp TEXT
+        )
+        """)
+        
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS families (
+            family_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT,
+            leader_id INTEGER,
+            created_at TEXT
+        )
+        """)
+        
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS staff (
+            user_id INTEGER PRIMARY KEY,
+            role TEXT,
+            permissions TEXT,
+            join_date TEXT
+        )
+        """)
+
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS primeira_dama (
+            server_id INTEGER,
+            user_id INTEGER,
+            cargo_name TEXT,
+            data_indicacao TEXT,
+            PRIMARY KEY (server_id, user_id),
+            FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+        )
+        """)
+        
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS minha_tabela (
+            id INTEGER PRIMARY KEY,
+            nome TEXT
+        )
+        """)
+        
+        conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_pd_server ON primeira_dama (server_id)
+        """)
+        
+        conn.commit()
+        
+        # Consulta corrigida para listar tabelas
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = cursor.fetchall()
+        
+        print("Tabelas existentes no banco de dados:")
+        for row in tables:
+            print(f"- {row[0]}")  # Acessa por índice (0) em vez de nome
+        
+        success = True
+    except sqlite3.Error as e:
+        print(f"Erro ao inicializar banco de dados: {e}")
+    
+    if not success:
+        fallback_db = Path(os.getenv('TEMP', '/temp')) / "bot_data_fallback.db"
+        print(f"Tentando criar banco de dados em local alternativo: {fallback_db}")
+        try:
+            conn = sqlite3.connect(fallback_db)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA foreign_keys = ON")
+            
+            # Criação das tabelas no fallback
+            conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                money INTEGER DEFAULT 0,
+                bank INTEGER DEFAULT 0,
+                rep INTEGER DEFAULT 0,
+                xp INTEGER DEFAULT 0,
+                level INTEGER DEFAULT 1,
+                last_daily TEXT,
+                last_rep TEXT,
+                about_me TEXT,
+                vip INTEGER DEFAULT 0,
+                vip_level INTEGER DEFAULT 0,
+                family_id INTEGER
+            )
+            """)
+            
+            conn.execute("""
+            CREATE TABLE IF NOT EXISTS warns (
+                warn_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                moderator_id INTEGER,
+                reason TEXT,
+                timestamp TEXT
+            )
+            """)
+            
+            conn.execute("""
+            CREATE TABLE IF NOT EXISTS families (
+                family_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT,
+                leader_id INTEGER,
+                created_at TEXT
+            )
+            """)
+            
+            conn.execute("""
+            CREATE TABLE IF NOT EXISTS staff (
+                user_id INTEGER PRIMARY KEY,
+                role TEXT,
+                permissions TEXT,
+                join_date TEXT
+            )
+            """)
+
+            conn.execute("""
+            CREATE TABLE IF NOT EXISTS primeira_dama (
+                server_id INTEGER,
+                user_id INTEGER,
+                cargo_name TEXT,
+                data_indicacao TEXT,
+                PRIMARY KEY (server_id, user_id),
+                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+            )
+            """)
+            
+            conn.execute("""
+            CREATE TABLE IF NOT EXISTS minha_tabela (
+                id INTEGER PRIMARY KEY,
+                nome TEXT
+            )
+            """)
+            
+            conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_pd_server ON primeira_dama (server_id)
+            """)
+            
+            conn.commit()
+            
+            # Consulta corrigida para listar tabelas no fallback
+            cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            print("Tabelas existentes no banco de dados (fallback):")
+            for row in cursor:
+                print(f"- {row[0]}")  # Acessa por índice (0) em vez de nome
+            
+            DB_PATH = fallback_db
+        except Exception as fallback_error:
+            print(f"Erro crítico ao criar banco de dados: {fallback_error}")
+            raise
+
+
+# ========== FUNÇÕES AUXILIARES PARA NOVOS COMANDOS ==========
+
+def format_currency(amount):
+    """Formata valores monetários"""
+    return f"💵 {amount:,} moedas"  # Corrigido o emoji e formatação
+
+async def get_user_data(user_id):
+    """
+    Obtém dados do usuário garantindo:
+    - Sempre retorna um dicionário
+    - Valores padrão seguros
+    - Conversão explícita de tipos
+    - Tratamento de erros completo
+    """
+    # Dados padrão (garante estrutura mesmo em falhas)
+    DEFAULT_DATA = {
+        'money': 0,
+        'bank': 0,
+        'level': 1,
+        'last_daily': None,
+        'last_rep': None
+    }
+    
+    # Modo de teste (simulação)
+    if TEST_MODE:
+        return {**DEFAULT_DATA, **test_db['users'].get(str(user_id)), }
+    
+    # Modo produção (banco real)
+    try:
+        with get_db() as conn:
+            # Consulta segura com tratamento de None
+            result = conn.execute(
+                """SELECT money, bank, level, 
+                          last_daily, last_rep 
+                   FROM users 
+                   WHERE user_id = ?""",
+                (user_id,)
+            ).fetchone()
+            
+            if not result:
+                return DEFAULT_DATA
+                
+            # Conversão explícita e segura para dicionário
+            if hasattr(result, '_fields'):  # sqlite3.Row
+                return {
+                    'money': int(result['money']),
+                    'bank': int(result['bank']),
+                    'level': int(result['level']),
+                    'last_daily': result['last_daily'],
+                    'last_rep': result['last_rep']
+                }
+            else:  # Outros formatos (tupla, etc)
+                return {
+                    'money': int(result[0]),
+                    'bank': int(result[1]),
+                    'level': int(result[2]),
+                    'last_daily': result[3],
+                    'last_rep': result[4]
+                }
+                
+    except sqlite3.Error as db_error:
+        print(f"🚨 Erro no banco de dados: {db_error}")
+        return DEFAULT_DATA
+    except Exception as general_error:
+        print(f"⚠️ Erro inesperado: {general_error}")
+        return DEFAULT_DATA
+    
+# ============= LOCK GLOBAL ABSOLUTO ANTI-DUPLICAÇÃO =============
+GLOBAL_HELP_LOCK = asyncio.Lock()
+ACTIVE_HELP_USERS = set()
+
+@bot.command(name='f')  # COMANDO ÚNICO - LOCK GLOBAL
+async def help_command(ctx):
+    """ANTI-DUPLICAÇÃO RADICAL - LOCK GLOBAL"""
+    if ctx.author.bot:
+        return
+    
+    user_id = ctx.author.id
+    
+    # 🚫 LOCK GLOBAL ABSOLUTO - IMPOSSÍVEL DUPLICAR
+    async with GLOBAL_HELP_LOCK:
+        if user_id in ACTIVE_HELP_USERS:
+            logger_main.error(f"🚫 RADICAL: DUPLICAÇÃO BLOQUEADA para {user_id}")
+            return
+        ACTIVE_HELP_USERS.add(user_id)
+    
+    try:
+        logger_main.error(f"🎯 RADICAL: COMANDO !f ÚNICO para {user_id}")
+        
+        # Remove qualquer painel existente IMEDIATAMENTE
+        async with help_manager._lock:
+            if user_id in help_manager.active_panels:
+                try:
+                    await help_manager.active_panels[user_id].delete()
+                    logger_main.error(f"🗑️ RADICAL: Painel anterior DELETADO para {user_id}")
+                except:
+                    pass
+                del help_manager.active_panels[user_id]
+        
+        # Cria APENAS UM painel
+        message = await help_manager._send_new_panel(ctx)
+        
+        # Registra no singleton
+        async with help_manager._lock:
+            help_manager.active_panels[user_id] = message
+        
+        logger_main.error(f"✅ RADICAL: PAINEL ÚNICO CRIADO para {user_id} - Total: {len(help_manager.active_panels)}")
+        
+    except Exception as e:
+        logger_main.error(f"❌ RADICAL: ERRO para {user_id}: {e}")
+    finally:
+        # SEMPRE libera o lock global
+        async with GLOBAL_HELP_LOCK:
+            ACTIVE_HELP_USERS.discard(user_id)
+        logger_main.error(f"🔓 RADICAL: Lock liberado para {user_id}")
+
+# ================= CONFIGURAÇÃO PRINCIPAL =================
+LOG_CHANNEL_ID = 1388002478921879582
+VOICE_COUNTER_CHANNEL_ID = 1388002478921879582
+
+# ================= SISTEMA DE LOGS =================
+async def registrar_log(comando: str, autor: discord.Member, alvo=None, motivo=None):
+    """Registra ações no canal de logs"""
+    try:
+        log_channel = bot.get_channel(LOG_CHANNEL_ID)
+        if not log_channel:
+            print("⚠️ Canal de log não encontrado!")
+            return
+
+        embed = discord.Embed(
+            title=f"📝 {comando.title()}",
+            color=0x3498db,
+            timestamp=datetime.now(timezone.utc)
+        )
+        embed.add_field(name="Autor", value=f"{autor.mention} ({autor.id})", inline=False)
+        
+        if alvo:
+            embed.add_field(name="Alvo", value=f"{alvo.mention} ({alvo.id})", inline=False)
+        if motivo:
+            embed.add_field(name="Motivo", value=motivo, inline=False)
+            
+        await log_channel.send(embed=embed)
+    except Exception as e:
+        print(f"Erro ao registrar log: {e}")
+
+# ================= TRATAMENTO DE ERROS OTIMIZADO =================
+@bot.event
+async def on_command_error(ctx, error):
+    """Sistema robusto de tratamento de erros"""
+    
+    # Erros ignorados silenciosamente
+    ignored_errors = (commands.CommandNotFound, commands.DisabledCommand)
+    if isinstance(error, ignored_errors):
+        return
+    
+    # Erros de permissão
+    elif isinstance(error, commands.MissingPermissions):
+        perms = ', '.join([p.replace('_', ' ').title() for p in error.missing_permissions])
+        await ctx.send(f"❌ **Sem permissão!** Você precisa de: `{perms}`", delete_after=10)
+    
+    elif isinstance(error, commands.BotMissingPermissions):
+        perms = ', '.join([p.replace('_', ' ').title() for p in error.missing_permissions])
+        await ctx.send(f"❌ **Bot sem permissão!** Preciso de: `{perms}`", delete_after=10)
+    
+    # Erros de argumentos
+    elif isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send(f"❌ **Argumento faltando:** `{error.param.name}`. Use `!ajuda` para detalhes.", delete_after=10)
+    
+    elif isinstance(error, commands.BadArgument):
+        await ctx.send(f"❌ **Argumento inválido!** Verifique o formato e tente novamente.", delete_after=10)
+    
+    elif isinstance(error, (commands.MemberNotFound, commands.UserNotFound)):
+        await ctx.send("❌ **Usuário não encontrado!** Verifique se mencionou corretamente.", delete_after=10)
+    
+    elif isinstance(error, commands.RoleNotFound):
+        await ctx.send("❌ **Cargo não encontrado!** Verifique o nome do cargo.", delete_after=10)
+    
+    elif isinstance(error, commands.ChannelNotFound):
+        await ctx.send("❌ **Canal não encontrado!** Verifique se o canal existe.", delete_after=10)
+    
+    # Cooldown
+    elif isinstance(error, commands.CommandOnCooldown):
+        remaining = int(error.retry_after)
+        time_format = f"{remaining}s" if remaining < 60 else f"{remaining//60}m {remaining%60}s"
+        await ctx.send(f"⏳ **Calma aí!** Aguarde {time_format} para usar `!{ctx.command}` novamente.", delete_after=min(15, remaining))
+    
+    # Erros de contexto
+    elif isinstance(error, commands.NoPrivateMessage):
+        await ctx.send("❌ **Este comando só funciona em servidores!**", delete_after=10)
+    
+    elif isinstance(error, commands.PrivateMessageOnly):
+        await ctx.send("❌ **Este comando só funciona em DM!**", delete_after=10)
+    
+    # Erros HTTP do Discord
+    elif isinstance(error, discord.HTTPException):
+        if error.status == 429:
+            await ctx.send("⏳ **Rate limit ativado!** Tente novamente em alguns segundos.", delete_after=15)
+        elif error.status == 403:
+            await ctx.send("❌ **Sem permissão para executar esta ação!**", delete_after=10)
+        elif error.status == 404:
+            await ctx.send("❌ **Recurso não encontrado!** Pode ter sido deletado.", delete_after=10)
+        else:
+            logging.error(f"HTTP Exception {error.status}: {error}")
+            await ctx.send("⚠️ **Erro de conexão.** Tente novamente.", delete_after=10)
+    
+    # PROTEÇÃO ESPECIAL para CommandInvokeError com UnboundLocalError
+    elif isinstance(error, commands.CommandInvokeError):
+        original_error = error.original
+        
+        # Tratamento específico para UnboundLocalError
+        if isinstance(original_error, UnboundLocalError):
+            logger_main.critical(f"🚨 ERRO CRÍTICO: UnboundLocalError no comando {ctx.command} por {ctx.author}")
+            logger_main.critical(f"Variável não definida: {str(original_error)}")
+            logger_main.critical(f"Stack trace: {error}")
+            logger_main.critical(f"⚠️ ATENÇÃO: Este erro deveria ter sido resolvido com a correção do like_button. Se ainda aparecer, há outro problema!")
+            
+            # Força limpeza do sistema de ajuda se necessário
+            if ctx.command and ctx.command.name in ['lajuda', 'lf', 'f']:
+                try:
+                    async with help_manager._lock:
+                        help_manager.processing_users.discard(ctx.author.id if ctx else None)
+                    logger_main.info("🔧 Sistema de ajuda forçadamente resetado devido a UnboundLocalError")
+                except Exception as cleanup_error:
+                    logger_main.error(f"Erro na limpeza forçada: {cleanup_error}")
+            
+            if await bot.is_owner(ctx.author):
+                await ctx.send(f"🚨 **ERRO CRÍTICO UnboundLocalError:** `{str(original_error)}`\n💡 Sistema resetado automaticamente.", delete_after=30)
+            else:
+                await ctx.send("❌ **Erro interno detectado.** O sistema foi resetado automaticamente. Tente novamente em alguns segundos.", delete_after=15)
+            return
+        
+        # Outros CommandInvokeError
+        logging.error(f"CommandInvokeError em {ctx.command}: {type(original_error).__name__}: {original_error}")
+        if await bot.is_owner(ctx.author):
+            await ctx.send(f"🔧 **Debug Info:** `{type(original_error).__name__}: {str(original_error)[:100]}`", delete_after=20)
+        else:
+            await ctx.send("⚠️ **Erro inesperado.** O erro foi registrado para análise.", delete_after=10)
+    
+    # Erros críticos/inesperados
+    else:
+        # Log detalhado para depuração
+        logging.error(f"Erro não tratado em {ctx.command}: {type(error).__name__}: {error}")
+        
+        # Debug info para desenvolvedores
+        if await bot.is_owner(ctx.author):
+            await ctx.send(f"🔧 **Debug Info:** `{type(error).__name__}: {str(error)[:100]}`", delete_after=20)
+        else:
+            await ctx.send("⚠️ **Erro inesperado.** O erro foi registrado para análise.", delete_after=10)
+    
+    # Limpa mensagens de erro antigas (opcional)
+    try:
+        async for message in ctx.channel.history(limit=3, before=ctx.message):
+            if (message.author == bot.user and 
+                any(message.content.startswith(prefix) for prefix in ['❌', '⏳', '⚠️']) and
+                (datetime.now(timezone.utc) - message.created_at).seconds < 30):
+                await message.delete()
+                break
+    except:
+        pass
+
+# ================= COMANDO CARTEIRA ATUALIZADO =================
+@bot.command(name='carteira')
+@commands.cooldown(1, 5, BucketType.user)
+async def carteira(ctx, member: discord.Member = None):
+    """Mostra saldo com proteção contra duplicação"""
+    # Verificação inicial
+    if ctx.author.bot:
+        return
+    
+    member = member or ctx.author
+    
+    # Sistema duplo de prevenção:
+    # 1. Limpa mensagens anteriores do bot para este usuário
+    async for msg in ctx.channel.history(limit=10):
+        if msg.author == bot.user and msg.embeds and f"Carteira de {member.display_name}" in msg.embeds[0].title:
+            try:
+                await msg.delete()
+            except:
+                pass
+    
+    # 2. Limpa através do sistema LAST_WALLET_MESSAGES (se ainda existir)
+    try:
+        if ctx.author.id in LAST_WALLET_MESSAGES:
+            old_msg = LAST_WALLET_MESSAGES[ctx.author.id]
+            await old_msg.delete()
+    except:
+        pass
+    
+    try:
+        user_data = await get_user_data(member.id)
+        
+        money = int(user_data.get('money', 0))
+        bank = int(user_data.get('bank', 0))
+        total = money + bank
+        
+        embed = discord.Embed(
+            title=f"💰 Carteira de {member.display_name}",
+            color=0x00ff00
+        )
+        embed.add_field(name="💵 Carteira", value=f"{money:,} moedas", inline=True)
+        embed.add_field(name="🏦 Banco", value=f"{bank:,} moedas", inline=True)
+        embed.add_field(name="💎 Total", value=f"{total:,} moedas", inline=False)
+        
+        # Envia a nova mensagem e atualiza o cache
+        msg = await ctx.send(embed=embed)
+        LAST_WALLET_MESSAGES[ctx.author.id] = msg  # Atualiza o dicionário global
+        
+        # Auto-delete após 30 segundos (opcional)
+        await asyncio.sleep(30)
+        try:
+            await msg.delete()
+            await ctx.message.delete()
+        except:
+            pass
+            
+    except Exception as e:
+        print(f"Erro no comando carteira: {e}")
+        error_msg = await ctx.send("⚠️ Ocorreu um erro ao acessar os dados financeiros.", delete_after=10)
+        await asyncio.sleep(10)
+        try:
+            await error_msg.delete()
+        except:
+            pass
+
+# ================= SISTEMA DE XP/NÍVEIS =================
+@bot.listen('on_message')
+async def on_message_listener(message):
+    """Escuta mensagens para o sistema de XP (não processa comandos duplicados)"""
+    if message.author == bot.user:  # Ignora mensagens do próprio bot
+        return
+
+    # Se a mensagem começa com o prefixo (!), deixa o Discord.py processar o comando normalmente
+    if message.content.startswith(bot.command_prefix):
+        return
+
+    # Sistema de XP (apenas para mensagens normais, não comandos)
+    if TEST_MODE:
+        user_id = str(message.author.id)
+        if user_id not in test_db['users']:
+            test_db['users'][user_id] = {
+                'xp': 10,
+                'level': 1,
+                'money': 0,
+                'rep': 0
+            }
+        else:
+            test_db['users'][user_id]['xp'] += 5
+        
+        xp = test_db['users'][user_id]['xp']
+        level = test_db['users'][user_id]['level']
+        xp_needed = level * 100
+        
+        if xp >= xp_needed:
+            test_db['users'][user_id]['level'] += 1
+            test_db['users'][user_id]['xp'] -= xp_needed
+            await message.channel.send(f"🎉 {message.author.mention} subiu para o nível {level + 1}!")
+    else:
+        with get_db() as conn:
+            user = conn.execute(
+                "SELECT * FROM users WHERE user_id = ?", 
+                (message.author.id,)
+            ).fetchone()
+            
+            if not user:
+                conn.execute(
+                    "INSERT INTO users (user_id, xp, level, money) VALUES (?, ?, ?, ?)",
+                    (message.author.id, 10, 1, 0)
+                )
+                xp = 10
+                level = 1
+            else:
+                conn.execute(
+                    "UPDATE users SET xp = xp + 5 WHERE user_id = ?",
+                    (message.author.id,)
+                )
+                xp = user['xp'] + 5
+                level = user['level']
+            
+            xp_needed = level * 100
+            if xp >= xp_needed:
+                conn.execute(
+                    "UPDATE users SET level = level + 1, xp = xp - ? WHERE user_id = ?",
+                    (xp_needed, message.author.id)
+                )
+                await message.channel.send(f"🎉 {message.author.mention} subiu para o nível {level + 1}!")
+            
+            conn.commit()
+
+# ================= COMANDOS DE APARÊNCIA =================
+@bot.command(name='andar')
+@commands.is_owner()
+async def andar(ctx, *, status: str):
+    """Altera o status 'Jogando' do bot (apenas dono)"""
+    try:
+        await bot.change_presence(activity=discord.Game(name=status))
+        await ctx.send(f"✅ Status alterado para: **{status}**")
+        await registrar_log("alterar_status", ctx.author, motivo=f"Novo status: {status}")
+    except Exception as e:
+        await ctx.send(f"❌ Erro ao alterar status: {e}")
+
+@bot.command(name='setavatar')
+@commands.is_owner()
+async def set_avatar(ctx, url: str):
+    """Altera o avatar do bot via URL (apenas dono)"""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as response:
+                if response.status == 200:
+                    await bot.user.edit(avatar=await response.read())
+                    await ctx.send("✅ Avatar atualizado!")
+                    await registrar_log("alterar_avatar", ctx.author)
+                else:
+                    await ctx.send("❌ URL inválida ou imagem não acessível")
+    except Exception as e:
+        await ctx.send(f"❌ Erro ao atualizar avatar: {e}")
+
+@bot.command(name='setbanner')
+@commands.is_owner()
+async def set_banner(ctx, url: str):
+    """Altera o banner do bot (requer conta premium)"""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as response:
+                if response.status == 200:
+                    await bot.user.edit(banner=await response.read())
+                    await ctx.send("✅ Banner atualizado!")
+                    await registrar_log("alterar_banner", ctx.author)
+                else:
+                    await ctx.send("❌ URL inválida ou imagem não acessível")
+    except discord.HTTPException:
+        await ctx.send("❌ Seu bot precisa ter **Nitro** para alterar o banner!")
+    except Exception as e:
+        await ctx.send(f"❌ Erro desconhecido: {e}")
+
+@bot.command(name='setusername')
+@commands.is_owner()
+async def set_username(ctx, *, nome: str):
+    """Altera o nome de usuário do bot (apenas dono)"""
+    try:
+        if len(nome) < 2 or len(nome) > 32:
+            await ctx.send("❌ O nome deve ter entre 2 e 32 caracteres!")
+            return
+            
+        await bot.user.edit(username=nome)
+        await ctx.send(f"✅ Nome alterado para: **{nome}**")
+        await registrar_log("alterar_username", ctx.author, motivo=f"Novo nome: {nome}")
+    except discord.HTTPException as e:
+        if "TOO_MANY_USERNAME_CHANGES" in str(e):
+            await ctx.send("❌ Você só pode alterar o nome **2 vezes por hora**!")
+        else:
+            await ctx.send(f"❌ Erro ao alterar nome: {e}")
+    except Exception as e:
+        await ctx.send(f"❌ Erro desconhecido: {e}")
+
+
+# ================= MENU INTERATIVO DE AJUDA =================
+# ===== SISTEMA ANTIGO COMPLETAMENTE REMOVIDO =====
+# TODO O SISTEMA ANTERIOR FOI ELIMINADO PARA EVITAR DUPLICAÇÃO
+
+# ================= COMANDOS FALTANTES =================
+
+@bot.command(name='tempo')
+async def tempo_membro(ctx, member: discord.Member = None):
+    """Mostra há quanto tempo o membro está no servidor"""
+    member = member or ctx.author
+    join_date = member.joined_at
+    
+    embed = discord.Embed(
+        title=f"⏱️ Tempo no servidor - {member.display_name}",
+        description=f"{member.mention} está aqui desde {join_date.strftime('%d/%m/%Y')}",
+        color=0x00ff00
+    )
+    embed.add_field(name="Total no servidor", value=f"{(datetime.now(timezone.utc) - join_date).days} dias", inline=True)
+    await ctx.send(embed=embed)
+
+@bot.command(name='addvip')
+@commands.has_permissions(administrator=True)
+async def add_vip(ctx, member: discord.Member, level: int = 1):
+    """Adiciona status VIP a um membro"""
+    if level < 1 or level > 5:
+        return await ctx.send("❌ Nível VIP deve ser entre 1 e 5")
+    
+    if TEST_MODE:
+        user_id = str(member.id)
+        if user_id not in test_db['users']:
+            test_db['users'][user_id] = {}
+        test_db['users'][user_id]['vip_level'] = level
+    else:
+        with get_db() as conn:
+            conn.execute(
+                "UPDATE users SET vip_level = ? WHERE user_id = ?",
+                (level, member.id)
+            )
+            conn.commit()
+    
+    await ctx.send(f"✅ {member.mention} agora é VIP nível {level}!")
+
+@bot.command(name='addvipc')
+@commands.has_permissions(administrator=True)
+async def add_vip_with_role(ctx, member: discord.Member, role: discord.Role, level: int = 1):
+    """Adiciona VIP com cargo personalizado"""
+    await add_vip(ctx, member, level)
+    await member.add_roles(role)
+    await ctx.send(f"✅ Cargo {role.name} adicionado!")
+
+@bot.command(name='removevipc')
+@commands.has_permissions(administrator=True)
+async def remove_vip_with_role(ctx, member: discord.Member, role: discord.Role):
+    """Remove VIP e cargo"""
+    if TEST_MODE:
+        user_id = str(member.id)
+        if user_id in test_db['users']:
+            test_db['users'][user_id]['vip_level'] = 0
+    else:
+        with get_db() as conn:
+            conn.execute(
+                "UPDATE users SET vip_level = 0 WHERE user_id = ?",
+                (member.id,)
+            )
+            conn.commit()
+    
+    await member.remove_roles(role)
+    await ctx.send(f"✅ Status VIP e cargo {role.name} removidos de {member.mention}!")
+
+@bot.command(name='familia')
+@commands.has_permissions(administrator=True)
+async def criar_familia(ctx, *, nome: str):
+    """Cria uma família VIP"""
+    if TEST_MODE:
+        family_id = len(test_db['families']) + 1
+        test_db['families'].append({
+            'family_id': family_id,
+            'name': nome,
+            'leader_id': ctx.author.id,
+            'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        })
+    else:
+        with get_db() as conn:
+            conn.execute(
+                "INSERT INTO families (name, leader_id, created_at) VALUES (?, ?, ?)",
+                (nome, ctx.author.id, datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+            )
+            conn.commit()
+    
+    await ctx.send(f"✅ Família '{nome}' criada com sucesso!")
+
+@bot.command(name='addfamily')
+@commands.has_permissions(administrator=True)
+async def add_family_member(ctx, member: discord.Member, family_name: str):
+    """Adiciona membro à família"""
+    if TEST_MODE:
+        family = next((f for f in test_db['families'] if f['name'].lower() == family_name.lower()), None)
+        if not family:
+            return await ctx.send("❌ Família não encontrada!")
+        
+        user_id = str(member.id)
+        if user_id not in test_db['users']:
+            test_db['users'][user_id] = {}
+        test_db['users'][user_id]['family_id'] = family['family_id']
+    else:
+        with get_db() as conn:
+            family = conn.execute(
+                "SELECT family_id FROM families WHERE LOWER(name) = LOWER(?)",
+                (family_name,)
+            ).fetchone()
+            
+            if not family:
+                return await ctx.send("❌ Família não encontrada!")
+            
+            conn.execute(
+                "UPDATE users SET family_id = ? WHERE user_id = ?",
+                (family['family_id'], member.id)
+            )
+            conn.commit()
+    
+    await ctx.send(f"✅ {member.mention} foi adicionado à família '{family_name}'!")
+
+@bot.command(name='removefamily')
+@commands.has_permissions(administrator=True)
+async def remove_family_member(ctx, member: discord.Member):
+    """Remove membro de família"""
+    if TEST_MODE:
+        user_id = str(member.id)
+        if user_id in test_db['users']:
+            test_db['users'][user_id]['family_id'] = None
+    else:
+        with get_db() as conn:
+            conn.execute(
+                "UPDATE users SET family_id = NULL WHERE user_id = ?",
+                (member.id,)
+            )
+            conn.commit()
+    
+    await ctx.send(f"✅ {member.mention} foi removido de sua família!")
+
+@bot.command(name='register')
+@commands.has_permissions(manage_roles=True)
+async def register_member(ctx, member: discord.Member):
+    """Registra um novo membro no servidor"""
+    # Aqui você pode adicionar lógica para atribuir cargos iniciais
+    await update_staff_points(ctx.author.id, 'registers')
+    await ctx.send(f"✅ {member.mention} foi registrado por {ctx.author.mention}!")
+
+@bot.command(name='verificar')
+@commands.has_permissions(manage_roles=True)
+async def verificar_membro(ctx, member: discord.Member):
+    """Verifica a identidade de um membro"""
+    await update_staff_points(ctx.author.id, 'verifications')
+    await ctx.send(f"✅ {member.mention} foi verificado por {ctx.author.mention}!")           
+
+# ================= VERIFICADOR DE COMANDOS =================
+def verificar_comandos():
+    """Verifica se todos os comandos essenciais estão registrados e configurados corretamente"""
+    problemas = []
+    comandos_verificados = 0
+    
+    comandos_essenciais = [
+        'lajuda', 'lf', 'f', 'lmute', 'lumpute', 'lban', 'ldesban',
+        'linfo', 'lserverinfo', 'ban', 'desban', 'mute', 'unmute', 'nick', 'cl',
+        'andar', 'setavatar', 'setbanner', 'setusername', 'empregos', 'trabalhar',
+        'addrole', 'removerole', 'advertence', 'removeadvertence', 'mutecall',
+        'unmutecall', 'unbanall', 'tempo', 'addvipc', 'removevipc', 'removefamily',
+        'carteira', 'daily', 'depositar', 'avatar', 'rep', 'addvip', 'familia',
+        'register', 'verificar', 'membersrole'
+    ]
+    
+    comandos_com_permissao = [
+        'lban', 'ldesban', 'lmute', 'lumpute', 'ban', 'desban', 'mute', 'unmute',
+        'nick', 'cl', 'addrole', 'removerole', 'removeadvertence', 'mutecall',
+        'unmutecall', 'unbanall', 'addvipc', 'removevipc', 'removefamily',
+        'addvip', 'familia', 'register', 'verificar'
+    ]
+    
+    # Verifica comandos faltantes
+    for cmd in comandos_essenciais:
+        if not bot.get_command(cmd):
+            problemas.append(f"- [ ] `!{cmd}`: Comando não registrado")
+
+    # Verifica cada comando existente
+    for comando in bot.commands:
+        if comando.name not in comandos_essenciais:
+            continue
+            
+        comandos_verificados += 1
+        
+        if comando.name in comandos_com_permissao:
+            has_check = any(
+                hasattr(check, '__commands_checks__') or 
+                'has_permission' in str(check)
+                for check in comando.checks
+            )
+            
+            if not has_check:
+                problemas.append(f"- [ ] `!{comando.name}`: Sem verificação de permissões adequadas")
+
+    # Exibe relatório
+    print("\n" + "="*40)
+    print(f"VERIFICAÇÃO DE COMANDOS ({comandos_verificados} comandos analisados)")
+    print("="*40)
+    
+    if problemas:
+        for problema in problemas:
+            print(problema)
+        print(f"\n{len(problemas)} problema(s) encontrado(s)!")
+    else:
+        print("✅ Todos os comandos estão configurados corretamente")
+    print("="*40 + "\n")
+    
+    return len(problemas) == 0
+
+# ================= VERIFICAÇÃO PERIÓDICA =================
+@tasks.loop(hours=24)
+async def verificar_periodicamente():
+    """Verifica os comandos do bot periodicamente"""
+    print("\n🔍 Executando verificação periódica de comandos...")
+    verificar_comandos()
+
+# ================= COMANDO CL =================
+@bot.command(name='cl')
+@commands.has_permissions(manage_messages=True)
+async def limpar(ctx, limite: int = 50):
+    """Limpa mensagens do chat (padrão: 50 mensagens)"""
+    try:
+        # Validação de entrada
+        if limite <= 0:
+            await ctx.send("❌ O número deve ser maior que 0!", delete_after=5)
+            return
+            
+        if limite > 100:
+            await ctx.send("⚠️ O limite máximo é de 100 mensagens por vez!", delete_after=5)
+            return
+        
+        # Verifica permissões do bot
+        if not ctx.guild.me.guild_permissions.manage_messages:
+            await ctx.send("❌ Eu não tenho permissão para gerenciar mensagens!", delete_after=10)
+            return
+            
+        # Executa limpeza
+        deleted = await ctx.channel.purge(limit=limite+1, check=lambda m: True)
+        
+        if deleted:
+            # Mensagem de sucesso (auto-deleta em 5 segundos)
+            success_msg = await ctx.send(f"🧹 **{len(deleted)-1} mensagens** foram limpas com sucesso!", delete_after=5)
+            await registrar_log("limpeza de mensagens", ctx.author, motivo=f"{len(deleted)-1} mensagens removidas")
+        else:
+            await ctx.send("ℹ️ Nenhuma mensagem foi encontrada para limpar.", delete_after=5)
+            
+    except discord.Forbidden:
+        await ctx.send("❌ **Sem permissão!** Preciso da permissão `Gerenciar Mensagens`.", delete_after=10)
+    except discord.HTTPException as e:
+        if "You can only bulk delete messages" in str(e):
+            await ctx.send("❌ Não posso deletar mensagens com mais de 14 dias!", delete_after=10)
+        else:
+            await ctx.send(f"❌ Erro HTTP: {str(e)[:100]}...", delete_after=10)
+    except Exception as e:
+        print(f"⚠️ Erro crítico no comando cl: {type(e).__name__}: {e}")
+        # Não mostra erro genérico - muito vago
+        await ctx.send("❌ Ocorreu um erro inesperado. Verifique minhas permissões.", delete_after=10)
+
+# ================= CONTADOR DE VOZ =================
+@tasks.loop(minutes=1)
+async def update_voice_counter():
+    """Atualiza o nome do canal de voz com a contagem de membros em chamadas"""
+    try:
+        guild = bot.guilds[0]
+        voice_channel = bot.get_channel(VOICE_COUNTER_CHANNEL_ID)
+        
+        if voice_channel:
+            members_in_voice = sum(len(channel.members) for channel in guild.voice_channels)
+            new_name = f"🎙️ Em call: {members_in_voice}"
+            
+            if voice_channel.name != new_name:
+                await voice_channel.edit(name=new_name)
+    except Exception as e:
+        print(f"Erro ao atualizar contador de voz: {e}")
+
+# ================= COMANDOS DE INFORMAÇÃO =================
+@bot.command(name='linfo')
+async def linfo(ctx):
+    """Mostra informações sobre o bot"""
+    embed = discord.Embed(
+        title="🤖 Informações do Bot",
+        color=0x00ff00,
+        description="Bot de moderação para gerenciamento de servidores Discord"
+    )
+    
+    embed.add_field(name="📅 Criado em", value=bot.user.created_at.strftime("%d/%m/%Y"), inline=True)
+    embed.add_field(name="⚙️ Versão", value="1.0", inline=True)
+    embed.add_field(name="📚 Comandos", value=f"{len(bot.commands)} comandos disponíveis", inline=True)
+    embed.add_field(name="🌐 Servidores", value=f"Presente em {len(bot.guilds)} servidores", inline=True)
+    embed.add_field(name="⏱️ Latência", value=f"{round(bot.latency * 1000)}ms", inline=True)
+    embed.add_field(name="🛠️ Desenvolvedor", value="[SeuNome]", inline=True)
+    embed.add_field(name="📝 Prefixo", value="`!`", inline=True)
+    embed.add_field(name="❓ Ajuda", value="Use `!f` para ver todos os comandos", inline=False)
+    embed.add_field(name="🛠️ Sistema", value="SQLite + Cache Otimizado", inline=True)
+    embed.add_field(name="🔄 Uptime", value="24/7 Online", inline=True)
+    
+    embed.set_thumbnail(url=bot.user.avatar.url)
+    embed.set_footer(text=f"Solicitado por {ctx.author.display_name}", icon_url=ctx.author.avatar.url)
+    
+    await ctx.send(embed=embed)
+
+@bot.command(name='lserverinfo', aliases=['lserver'])
+async def lserverinfo(ctx):
+    """Mostra informações detalhadas do servidor"""
+    guild = ctx.guild
+    
+    embed = discord.Embed(
+        title=f"📊 Informações do Servidor - {guild.name}",
+        color=0x7289da,
+        description=guild.description if guild.description else "Sem descrição"
+    )
+    
+    embed.add_field(name="👑 Dono", value=guild.owner.mention, inline=True)
+    embed.add_field(name="🆔 ID", value=guild.id, inline=True)
+    embed.add_field(name="📅 Criado em", value=guild.created_at.strftime("%d/%m/%Y"), inline=True)
+    embed.add_field(name="👥 Membros", value=guild.member_count, inline=True)
+    embed.add_field(name="💬 Canais", value=f"{len(guild.text_channels)} texto | {len(guild.voice_channels)} voz", inline=True)
+    embed.add_field(name="😎 Emojis", value=len(guild.emojis), inline=True)
+    embed.add_field(name="🚀 Nível de Boost", value=f"Nível {guild.premium_tier}", inline=True)
+    embed.add_field(name="✨ Boosts", value=guild.premium_subscription_count, inline=True)
+    embed.add_field(name="🔐 Verificação", value=str(guild.verification_level).title(), inline=True)
+    
+    if guild.icon:
+        embed.set_thumbnail(url=guild.icon.url)
+    if guild.banner:
+        embed.set_image(url=guild.banner.url)
+    
+    embed.set_footer(text=f"Solicitado por {ctx.author.display_name}", icon_url=ctx.author.avatar.url)
+    
+    await ctx.send(embed=embed)
+
+# ================= COMANDO AJUDA ROBUSTO =================
+# Sistema completamente reescrito sem bugs de duplicação
+# Variáveis antigas removidas - agora usa HelpPanelManager singleton
+
+# Funções antigas removidas - o HelpPanelManager singleton gerencia tudo
+
+# ================= SISTEMA DE AJUDA PROFISSIONAL - SOLUÇÃO DEFINITIVA =================
+class HelpPanelManager:
+    """
+    Gerenciador singleton profissional para painéis de ajuda
+    Implementa pattern Singleton + Circuit Breaker para eliminar duplicação
+    """
+    _instance = None
+    _lock = asyncio.Lock()
+    
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._initialized = False
+        return cls._instance
+    
+    def __init__(self):
+        if not getattr(self, '_initialized', False):
+            self.active_panels = {}  # user_id -> message
+            self.processing_users = set()  # users currently processing
+            self.last_request = {}  # user_id -> timestamp
+            self.circuit_breaker_delay = 2.0  # 2 seconds between requests
+            self._initialized = True
+    
+    async def can_create_panel(self, user_id):
+        """Verifica se o usuário pode criar um novo painel"""
+        current_time = time.time()
+        
+        # Circuit Breaker: verifica se passou tempo suficiente
+        if user_id in self.last_request:
+            time_diff = current_time - self.last_request[user_id]
+            if time_diff < self.circuit_breaker_delay:
+                return False, f"Aguarde {self.circuit_breaker_delay - time_diff:.1f}s"
+        
+        # Verifica se já está processando
+        if user_id in self.processing_users:
+            return False, "Já processando"
+        
+        return True, "OK"
+    
+    async def create_panel(self, ctx, logger):
+        """Cria um painel de ajuda garantindo unicidade absoluta"""
+        user_id = ctx.author.id
+        
+        logger.info(f"🎯 SINGLETON: Solicitação de painel para {user_id}")
+        
+        async with self._lock:
+            # Verificação final dentro do lock
+            can_create, reason = await self.can_create_panel(user_id)
+            if not can_create:
+                logger.debug(f"❌ SINGLETON: Painel negado para {user_id}: {reason}")
+                return False
+            
+            # Marca como processando
+            self.processing_users.add(user_id)
+            self.last_request[user_id] = time.time()
+            logger.debug(f"🔒 SINGLETON: Usuário {user_id} adquiriu lock")
+        
+        try:
+            # Remove painel anterior se existir
+            await self._cleanup_existing_panel(user_id, logger)
+            
+            # Cria novo painel
+            message = await self._send_new_panel(ctx)
+            
+            # Registra o novo painel
+            async with self._lock:
+                self.active_panels[user_id] = message
+            
+            logger.info(f"✅ SINGLETON: Painel criado para {user_id} - Total ativo: {len(self.active_panels)}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ SINGLETON: Erro ao criar painel para {user_id}: {e}")
+            return False
+        finally:
+            # Sempre remove do processamento
+            async with self._lock:
+                self.processing_users.discard(user_id)
+                logger.debug(f"🔓 SINGLETON: Usuário {user_id} liberou lock")
+    
+    async def _cleanup_existing_panel(self, user_id, logger):
+        """Remove painel existente do usuário"""
+        async with self._lock:
+            if user_id in self.active_panels:
+                old_panel = self.active_panels[user_id]
+                try:
+                    await old_panel.delete()
+                    logger.debug(f"🗑️ Painel anterior deletado para {user_id}")
+                except discord.NotFound:
+                    pass  # Já foi deletado
+                except Exception as e:
+                    logger.warning(f"⚠️ Erro ao deletar painel anterior: {e}")
+                finally:
+                    del self.active_panels[user_id]
+    
+    async def _send_new_panel(self, ctx):
+        """Envia o painel de ajuda"""
+        data_hora = datetime.now().strftime('%d/%m/%Y %H:%M')
+        
+        embed = discord.Embed(
+            title="🎮 PAINEL DE AJUDA FOLK APP",
+            description="**Selecione uma categoria no menu abaixo:**",
+            color=0x5A67D8
+        )
+        embed.add_field(
+            name="📋 Categorias Disponíveis:",
+            value=(
+                "```\n"
+                "Categoria    Descrição\n"
+                "ℹ️  Informação  → Comandos informativos\n"
+                "🛡️  Moderação  → Comandos de moderação\n" 
+                "🎉  Diversão   → Comandos de entretenimento\n"
+                "⚙️  Utilidade  → Ferramentas úteis\n"
+                "💰  Economia   → Sistema econômico\n"
+                "🌟  VIP        → Comandos exclusivos VIP\n"
+                "👑  PrimDama   → Comandos da Primeira Dama\n"
+                "```"
+            ),
+            inline=False
+        )
+        embed.set_footer(text=f"FOLK APP • {data_hora}")
+        
+        # Envia apenas o embed (sem view problemática)
+        message = await ctx.send(embed=embed)
+        return message
+    
+    async def cleanup_expired_panels(self, logger, max_age_seconds=300):
+        """Limpa painéis expirados (padrão: 5 minutos)"""
+        current_time = datetime.now()
+        expired_users = []
+        
+        async with self._lock:
+            for user_id, message in list(self.active_panels.items()):
+                try:
+                    # Calcula idade do painel
+                    message_time = message.created_at
+                    if hasattr(message_time, 'replace'):
+                        message_time = message_time.replace(tzinfo=None)
+                    
+                    age = (current_time - message_time).total_seconds()
+                    logger.debug(f"🔍 Painel {user_id}: idade {age:.1f}s (max: {max_age_seconds}s)")
+                    
+                    if age > max_age_seconds:
+                        expired_users.append(user_id)
+                        try:
+                            await message.delete()
+                            logger.debug(f"🗑️ Painel expirado deletado para usuário {user_id}")
+                        except discord.NotFound:
+                            pass  # Já foi deletado
+                        except Exception as e:
+                            logger.warning(f"⚠️ Erro ao deletar painel expirado: {e}")
+                except Exception as e:
+                    # Se não conseguir verificar idade, marca para remoção
+                    expired_users.append(user_id)
+                    logger.warning(f"⚠️ Erro ao verificar idade do painel {user_id}: {e}")
+            
+            # Remove registros expirados
+            for user_id in expired_users:
+                self.active_panels.pop(user_id, None)
+                self.processing_users.discard(user_id)
+        
+        if expired_users:
+            logger.info(f"🧹 Limpeza automática: {len(expired_users)} painéis expirados removidos")
+    
+    def get_status(self):
+        """Retorna status do sistema para debug"""
+        return {
+            "active_panels": len(self.active_panels),
+            "processing_users": len(self.processing_users),
+            "users_with_panels": list(self.active_panels.keys()),
+            "users_processing": list(self.processing_users)
+        }
+
+# Instância singleton global
+help_manager = HelpPanelManager()
+# ================= FUNÇÕES AUXILIARES DO SISTEMA DE AJUDA =================
+
+# ================= FUNÇÕES AUXILIARES (MANTIDAS PARA COMPATIBILIDADE) =================
+# Função duplicada removida
+
+# Limpeza automática do sistema (NOVO SISTEMA PROFISSIONAL)
+@tasks.loop(minutes=2)
+async def help_system_cleanup():
+    """Limpeza automática do sistema de ajuda profissional"""
+    try:
+        # Verifica se o help_manager existe
+        if 'help_manager' not in globals():
+            logger_main.warning("⚠️ help_manager não encontrado - pulando limpeza")
+            return
+        
+        # Executa limpeza de painéis expirados (5 minutos)
+        await help_manager.cleanup_expired_panels(logger_main, max_age_seconds=300)
+        
+        # Log de status para debug
+        status = help_manager.get_status()
+        if status['active_panels'] > 0 or status['processing_users'] > 0:
+            logger_main.debug(f"🔍 Status pós-limpeza: {status['active_panels']} painéis, {status['processing_users']} processando")
+            
+    except AttributeError as e:
+        logger_main.error(f"❌ Método não encontrado no help_manager: {e}")
+    except Exception as e:
+        logger_main.error(f"❌ Erro inesperado na limpeza automática: {type(e).__name__}: {e}")
+        # Log adicional para debug
+        logger_main.debug(f"help_manager type: {type(help_manager) if 'help_manager' in globals() else 'NOT_FOUND'}")
+
+# Inicia a limpeza automática quando o bot estiver pronto
+@help_system_cleanup.before_loop
+async def before_help_cleanup():
+    await bot.wait_until_ready()
+
+# ================= COMANDOS DE MODERAÇÃO =================
+@bot.command(name='lmute')
+@commands.has_permissions(moderate_members=True)
+async def lmute(ctx, member: discord.Member = None, tempo_minutos: int = 60, *, motivo=None):
+    """Silencia um membro por um determinado tempo (padrão: 60 minutos)"""
+    if not member:
+        return await ctx.send("❌ Você precisa mencionar um usuário! Exemplo: `!lmute @usuário [tempo] [motivo]`")
+    
+    try:
+        tempo = timedelta(minutes=tempo_minutos)
+        await member.timeout(tempo, reason=motivo)
+        
+        embed = discord.Embed(
+            title="🔇 Mute",
+            description=f"{member.mention} foi mutado por {tempo_minutos} minutos",
+            color=0xff9900
+        )
+        if motivo:
+            embed.add_field(name="Motivo", value=motivo, inline=False)
+            
+        await ctx.send(embed=embed)
+        await registrar_log("mute", ctx.author, member, f"{tempo_minutos} minutos | {motivo or 'Sem motivo'}")
+    except Exception as e:
+        await ctx.send(f"❌ Erro ao mutar: {e}")
+
+@bot.command(name='lumpute')
+@commands.has_permissions(moderate_members=True)
+async def lumpute(ctx, member: discord.Member = None):
+    """Remove o mute de um membro"""
+    if not member:
+        return await ctx.send("❌ Você precisa mencionar um usuário! Exemplo: `!lumpute @usuário`")
+        
+    try:
+        await member.timeout(None)
+        await ctx.send(f"✅ {member.mention} foi desmutado por {ctx.author.mention}")
+        await registrar_log("unmute", ctx.author, member)
+    except Exception as e:
+        await ctx.send(f"❌ Erro ao desmutar: {e}")
+
+@bot.command(name='lban')
+@commands.has_permissions(ban_members=True)
+async def lban(ctx, member: discord.Member = None, *, motivo=None):
+    """Bane um membro do servidor"""
+    if not member:
+        return await ctx.send("❌ Você precisa mencionar um usuário! Exemplo: `!lban @usuário [motivo]`")
+    
+    try:
+        await member.ban(reason=motivo)
+        embed = discord.Embed(
+            title="🔨 Banimento",
+            description=f"{member.mention} foi banido por {ctx.author.mention}",
+            color=0xff0000
+        )
+        if motivo:
+            embed.add_field(name="Motivo", value=motivo, inline=False)
+        await ctx.send(embed=embed)
+        await registrar_log("ban", ctx.author, member, motivo)
+    except Exception as e:
+        await ctx.send(f"❌ Erro ao banir: {e}")
+
+@bot.command(name='ldesban')
+@commands.has_permissions(ban_members=True)
+async def ldesban(ctx, user_id: str = None, *, motivo=None):
+    """Desbane um usuário usando seu ID"""
+    if not user_id:
+        return await ctx.send("❌ Você precisa fornecer um ID! Exemplo: `!ldesban 123456789`")
+    
+    try:
+        if user_id.startswith('<@') and user_id.endswith('>'):
+            user_id = user_id[2:-1]
+            if user_id.startswith('!'):
+                user_id = user_id[1:]
+
+        if not user_id.isdigit():
+            await ctx.send("❌ O ID do usuário deve conter apenas números!", delete_after=5)
+            return
+            
+        user_id = int(user_id)
+        
+        if user_id < 1:
+            await ctx.send("❌ ID inválido! Forneça um ID de usuário válido.", delete_after=5)
+            return
+
+        user = await bot.fetch_user(user_id)
+        await ctx.guild.unban(user, reason=motivo)
+        
+        embed = discord.Embed(
+            title="🔓 Desbanimento",
+            description=f"Usuário {user.mention} (`{user.id}`) foi desbanido por {ctx.author.mention}",
+            color=0x00ff00
+        )
+        if motivo:
+            embed.add_field(name="Motivo", value=motivo, inline=False)
+            
+        await ctx.send(embed=embed)
+        await registrar_log("desban", ctx.author, user, motivo)
+        
+    except discord.NotFound:
+        await ctx.send("❌ Usuário não encontrado ou não está banido.", delete_after=5)
+    except discord.Forbidden:
+        await ctx.send("❌ Eu não tenho permissão para desbanir usuários.", delete_after=5)
+    except discord.HTTPException as e:
+        await ctx.send(f"❌ Erro ao desbanir: {str(e)}", delete_after=5)
+    except Exception as e:
+        await ctx.send(f"❌ Ocorreu um erro inesperado: {str(e)}", delete_after=5)
+
+# ================= COMANDOS COMPATIBILIDADE =================
+@bot.command()
+@commands.has_permissions(ban_members=True)
+async def ban(ctx, member: discord.Member = None, *, motivo=None):
+    """Bane um membro do servidor"""
+    await lban(ctx, member, motivo=motivo)
+
+
+@bot.command()
+@commands.is_owner()
+async def test_pd(ctx):
+    """Testa a tabela primeira_dama"""
+    with get_db() as conn:
+        conn.execute("INSERT OR IGNORE INTO primeira_dama VALUES (?, ?, ?, ?)", 
+                   (ctx.guild.id, ctx.author.id, "Teste", "2023-01-01"))
+        conn.commit()
+        data = conn.execute("SELECT * FROM primeira_dama").fetchall()
+    await ctx.send(f"Dados: {data}")    
+
+@bot.command()
+@commands.has_permissions(ban_members=True)
+async def desban(ctx, user_id: str = None, *, motivo=None):
+    """Desbane um usuário usando seu ID"""
+    await ldesban(ctx, user_id, motivo=motivo)
+
+@bot.command()
+@commands.has_permissions(moderate_members=True)
+async def mute(ctx, member: discord.Member = None, tempo_minutos: int = 60, *, motivo=None):
+    """Silencia um membro por um determinado tempo (padrão: 60 minutos)"""
+    await lmute(ctx, member, tempo_minutos, motivo=motivo)
+
+@bot.command()
+@commands.has_permissions(moderate_members=True)
+async def unmute(ctx, member: discord.Member = None):
+    """Remove o mute de um membro"""
+    await lumpute(ctx, member)
+
+@bot.command()
+@commands.has_permissions(manage_nicknames=True)
+async def nick(ctx, member: discord.Member = None, *, novo_nick=None):
+    """Altera o apelido de um membro"""
+    if not member:
+        return await ctx.send("❌ Você precisa mencionar um usuário! Exemplo: `!nick @usuário [apelido]`")
+    
+    try:
+        await member.edit(nick=novo_nick)
+        if novo_nick:
+            await ctx.send(f"✅ Apelido de {member.mention} alterado para `{novo_nick}`")
+        else:
+            await ctx.send(f"✅ Apelido de {member.mention} foi resetado")
+        await registrar_log("alteração de nick", ctx.author, member, f"Novo nick: {novo_nick}")
+    except Exception as e:
+        await ctx.send(f"❌ Erro ao alterar nick: {e}")
+
+# ================= COMANDOS DE ECONOMIA =================
+@bot.command(name='empregos')
+async def empregos(ctx):
+    """Lista os empregos disponíveis"""
+    jobs = {
+        "👨‍🍳 Chef": "Salário: 50 moedas - Requer nível 5",
+        "👷 Construtor": "Salário: 40 moedas - Requer nível 3",
+        "👨‍💻 Programador": "Salário: 70 moedas - Requer nível 10",
+        "🎨 Designer": "Salário: 60 moedas - Requer nível 7",
+        "👨‍🔬 Cientista": "Salário: 80 moedas - Requer nível 15"
+    }
+    
+    embed = discord.Embed(
+        title="💼 Empregos Disponíveis",
+        description="Use !trabalhar para escolher um emprego aleatório",
+        color=0x3498db
+    )
+    
+    for job, info in jobs.items():
+        embed.add_field(name=job, value=info, inline=False)
+    
+    await ctx.send(embed=embed)
+
+@bot.command(name='trabalhar')
+async def trabalhar(ctx):
+    """Escolhe um emprego aleatório e ganha moedas"""
+    if TEST_MODE:
+        jobs = {
+            "👨‍🍳 Chef": {"salary": 50, "xp": 15},
+            "👷 Construtor": {"salary": 40, "xp": 10}
+        }
+        job, info = random.choice(list(jobs.items()))
+        
+        user_id = str(ctx.author.id)
+        if user_id not in test_db['users']:
+            test_db['users'][user_id] = {'money': 0, 'xp': 0, 'level': 1}
+            
+        test_db['users'][user_id]['money'] += info['salary']
+        test_db['users'][user_id]['xp'] += info['xp']
+        
+        embed = discord.Embed(
+            title="💼 Trabalho concluído!",
+            description=f"Você trabalhou como **{job}** e ganhou:\n"
+                       f"💰 {info['salary']} moedas\n"
+                       f"✨ {info['xp']} XP",
+            color=0x3498db
+        )
+        await ctx.send(embed=embed)
+        await registrar_log("trabalhar", ctx.author, motivo=f"Emprego: {job}, Ganhou: {info['salary']} moedas e {info['xp']} XP")
+    else:
+        jobs = {
+            "👨‍🍳 Chef": {"salary": 50, "xp": 15, "required_level": 5},
+            "👷 Construtor": {"salary": 40, "xp": 10, "required_level": 3},
+            "👨‍💻 Programador": {"salary": 70, "xp": 20, "required_level": 10},
+            "🎨 Designer": {"salary": 60, "xp": 15, "required_level": 7},
+            "👨‍🔬 Cientista": {"salary": 80, "xp": 25, "required_level": 15}
+        }
+        
+        with get_db() as conn:
+            user = conn.execute(
+                "SELECT level FROM users WHERE user_id = ?",
+                (ctx.author.id,)
+            ).fetchone()
+            
+            user_level = user['level'] if user else 1
+            
+            available_jobs = {job: info for job, info in jobs.items() if user_level >= info["required_level"]}
+            
+            if not available_jobs:
+                return await ctx.send("❌ Você não tem nível suficiente para nenhum emprego! Suba de nível e tente novamente.")
+            
+            job, info = random.choice(list(available_jobs.items()))
+            
+            conn.execute("""
+            INSERT INTO users (user_id, money, xp, level)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                money = money + ?,
+                xp = xp + ?
+            """, (
+                ctx.author.id,
+                info["salary"],
+                info["xp"],
+                user_level,
+                info["salary"],
+                info["xp"]
+            ))
+            conn.commit()
+
+        embed = discord.Embed(
+            title="💼 Trabalho concluído!",
+            description=f"Você trabalhou como **{job}** e ganhou:\n"
+                       f"💰 {info['salary']} moedas\n"
+                       f"✨ {info['xp']} XP",
+            color=0x3498db
+        )
+        await ctx.send(embed=embed)
+        await registrar_log("trabalhar", ctx.author, motivo=f"Emprego: {job}, Ganhou: {info['salary']} moedas e {info['xp']} XP")
+
+# ================= NOVOS COMANDOS DE MODERAÇÃO =================
+@bot.command(name='warn')
+@commands.has_permissions(kick_members=True)
+async def warn_user(ctx, member: discord.Member, *, motivo="Sem motivo especificado"):
+    """Adiciona uma advertência a um membro"""
+    warn_id = random.randint(1000, 9999)
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    
+    if TEST_MODE:
+        test_db['warns'].append({
+            'warn_id': warn_id,
+            'user_id': member.id,
+            'moderator_id': ctx.author.id,
+            'reason': motivo,
+            'timestamp': timestamp
+        })
+        warn_count = len([w for w in test_db['warns'] if w['user_id'] == member.id])
+    else:
+        with get_db() as conn:
+            conn.execute(
+                "INSERT INTO warns (warn_id, user_id, moderator_id, reason, timestamp) VALUES (?, ?, ?, ?, ?)",
+                (warn_id, member.id, ctx.author.id, motivo, timestamp)
+            )
+            warn_count = conn.execute("SELECT COUNT(*) FROM warns WHERE user_id = ?", (member.id,)).fetchone()[0]
+            conn.commit()
+    
+    embed = discord.Embed(
+        title="⚠️ Advertência Aplicada",
+        description=f"{member.mention} recebeu uma advertência",
+        color=0xff9900
+    )
+    embed.add_field(name="Motivo", value=motivo, inline=False)
+    embed.add_field(name="Moderador", value=ctx.author.mention, inline=True)
+    embed.add_field(name="Total de Warns", value=f"{warn_count}/3", inline=True)
+    embed.add_field(name="ID da Warn", value=warn_id, inline=True)
+    
+    if warn_count >= 3:
+        embed.add_field(name="🔨 Ação Automática", value="Usuário será banido por acúmulo de advertências!", inline=False)
+        try:
+            await member.ban(reason="3 advertências acumuladas")
+            embed.color = 0xff0000
+        except:
+            embed.add_field(name="⚠️", value="Erro ao banir automaticamente", inline=False)
+    
+    await ctx.send(embed=embed)
+    await registrar_log("warn", ctx.author, member, f"Motivo: {motivo} | ID: {warn_id}")
+
+@bot.command(name='castigar')
+@commands.has_permissions(moderate_members=True)
+async def castigar(ctx, member: discord.Member, tempo: int = 60, *, motivo="Comportamento inadequado"):
+    """Castiga um membro com timeout temporário"""
+    try:
+        timeout_time = timedelta(minutes=tempo)
+        await member.timeout(timeout_time, reason=motivo)
+        
+        embed = discord.Embed(
+            title="⏱️ Castigo Aplicado",
+            description=f"{member.mention} foi castigado por {tempo} minutos",
+            color=0xff6600
+        )
+        embed.add_field(name="Motivo", value=motivo, inline=False)
+        embed.add_field(name="Moderador", value=ctx.author.mention, inline=True)
+        embed.add_field(name="Duração", value=f"{tempo} minutos", inline=True)
+        
+        await ctx.send(embed=embed)
+        await registrar_log("castigar", ctx.author, member, f"Tempo: {tempo}min | Motivo: {motivo}")
+    except Exception as e:
+        await ctx.send(f"❌ Erro ao aplicar castigo: {e}")
+
+@bot.command(name='removecastigo')
+@commands.has_permissions(moderate_members=True)
+async def removecastigo(ctx, member: discord.Member):
+    """Remove o castigo/timeout de um membro"""
+    try:
+        await member.timeout(None)
+        await ctx.send(f"✅ Castigo removido de {member.mention} por {ctx.author.mention}")
+        await registrar_log("remove_castigo", ctx.author, member)
+    except Exception as e:
+        await ctx.send(f"❌ Erro ao remover castigo: {e}")
+
+@bot.command(name='lock')
+@commands.has_permissions(manage_channels=True)
+async def lock_channel(ctx, channel: discord.TextChannel = None):
+    """Trava um canal para @everyone"""
+    channel = channel or ctx.channel
+    overwrite = channel.overwrites_for(ctx.guild.default_role)
+    overwrite.send_messages = False
+    
+    await channel.set_permissions(ctx.guild.default_role, overwrite=overwrite)
+    await ctx.send(f"🔒 Canal {channel.mention} foi travado!")
+    await registrar_log("lock_channel", ctx.author, motivo=f"Canal: {channel.name}")
+
+@bot.command(name='unlock')
+@commands.has_permissions(manage_channels=True)
+async def unlock_channel(ctx, channel: discord.TextChannel = None):
+    """Destrava um canal para @everyone"""
+    channel = channel or ctx.channel
+    overwrite = channel.overwrites_for(ctx.guild.default_role)
+    overwrite.send_messages = None
+    
+    await channel.set_permissions(ctx.guild.default_role, overwrite=overwrite)
+    await ctx.send(f"🔓 Canal {channel.mention} foi destravado!")
+    await registrar_log("unlock_channel", ctx.author, motivo=f"Canal: {channel.name}")
+
+@bot.command(name='nuke')
+@commands.has_permissions(manage_channels=True)
+async def nuke_channel(ctx):
+    """Recria o canal atual (apaga todas as mensagens)"""
+    channel = ctx.channel
+    position = channel.position
+    new_channel = await channel.clone()
+    await new_channel.edit(position=position)
+    await channel.delete()
+    
+    embed = discord.Embed(
+        title="💥 Canal Resetado",
+        description=f"Canal foi completamente limpo por {ctx.author.mention}",
+        color=0xff0000
+    )
+    await new_channel.send(embed=embed)
+    await registrar_log("nuke_channel", ctx.author, motivo=f"Canal: {channel.name}")
+
+@bot.command(name='bangif')
+@commands.has_permissions(ban_members=True)
+async def ban_with_gif(ctx, member: discord.Member, *, motivo="Sem motivo especificado"):
+    """Bane um membro com GIF dramático"""
+    ban_gifs = [
+        "https://media.giphy.com/media/3o7aCRloybJlXpNjSU/giphy.gif",
+        "https://media.giphy.com/media/l0HlvtIPzPdt2usKs/giphy.gif",
+        "https://media.giphy.com/media/3o6Zt4HU9uwXmXSAuI/giphy.gif"
+    ]
+    
+    try:
+        await member.ban(reason=motivo)
+        
+        embed = discord.Embed(
+            title="🔨 BANIDO COM ESTILO!",
+            description=f"{member.mention} foi eliminado do servidor!",
+            color=0xff0000
+        )
+        embed.add_field(name="Motivo", value=motivo, inline=False)
+        embed.add_field(name="Moderador", value=ctx.author.mention, inline=True)
+        embed.set_image(url=random.choice(ban_gifs))
+        
+        await ctx.send(embed=embed)
+        await registrar_log("ban_gif", ctx.author, member, motivo)
+    except Exception as e:
+        await ctx.send(f"❌ Erro ao banir: {e}")
+
+@bot.command(name='kick')
+@commands.has_permissions(kick_members=True)
+async def kick_member(ctx, member: discord.Member, *, motivo="Sem motivo especificado"):
+    """Expulsa um membro do servidor"""
+    try:
+        await member.kick(reason=motivo)
+        
+        embed = discord.Embed(
+            title="👢 Membro Expulso",
+            description=f"{member.mention} foi expulso do servidor",
+            color=0xff9900
+        )
+        embed.add_field(name="Motivo", value=motivo, inline=False)
+        embed.add_field(name="Moderador", value=ctx.author.mention, inline=True)
+        
+        await ctx.send(embed=embed)
+        await registrar_log("kick", ctx.author, member, motivo)
+    except Exception as e:
+        await ctx.send(f"❌ Erro ao expulsar: {e}")
+
+# ================= COMANDO DAILY CORRIGIDO =================
+@bot.command(name='daily')
+@commands.cooldown(1, 86400, commands.BucketType.user)  # 24h de cooldown
+async def daily(ctx):
+    """Resgata recompensa diária - Executa apenas UMA vez"""
+    if ctx.author.bot:  # Ignora se for um bot
+        return
+    
+    # Verificação adicional para evitar duplicação
+    if hasattr(ctx, '_daily_processed'):
+        return
+    ctx._daily_processed = True  # Marca como processado
+
+    try:
+        # Verifica se já resgatou hoje (verificação adicional ao cooldown)
+        user_data = await get_user_data(ctx.author.id)
+        
+        if user_data['last_daily']:
+            last_claimed = datetime.strptime(user_data['last_daily'], '%Y-%m-%d %H:%M:%S')
+            if (datetime.now() - last_claimed).total_seconds() < 86400:
+                return await ctx.send("⏳ Você já resgatou sua recompensa diária hoje!", delete_after=10)
+
+        reward = random.randint(100, 500)
+        
+        if TEST_MODE:
+            user_id = str(ctx.author.id)
+            test_db['users'][user_id]['money'] = test_db['users'][user_id].get('money', 0) + reward
+            test_db['users'][user_id]['last_daily'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        else:
+            with get_db() as conn:
+                conn.execute(
+                    "UPDATE users SET money = money + ?, last_daily = ? WHERE user_id = ?",
+                    (reward, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), ctx.author.id)
+                )
+                conn.commit()
+        
+        embed = discord.Embed(
+            title="🎁 Recompensa Diária",
+            description=f"{ctx.author.mention} resgatou {format_currency(reward)}!",
+            color=0x00ff00
+        )
+        embed.set_footer(text="Volte amanhã para outra recompensa!")
+        msg = await ctx.send(embed=embed)
+        
+        # Delete após 30 segundos para evitar spam
+        await asyncio.sleep(30)
+        try:
+            await msg.delete()
+            await ctx.message.delete()
+        except:
+            pass
+            
+    except Exception as e:
+        print(f"Erro no daily: {e}")
+        await ctx.send("⚠️ Ocorreu um erro ao processar seu daily.", delete_after=10)
+
+# ================= COMANDOS DE ECONOMIA ADICIONAIS =================
+@bot.command(name='depositar')
+async def depositar(ctx, amount: str):
+    """Deposita moedas no banco"""
+    user_data = await get_user_data(ctx.author.id)
+    
+    if amount.lower() == 'all':
+        amount = user_data['money']
+    else:
+        try:
+            amount = int(amount)
+            if amount <= 0:
+                await ctx.send("❌ Valor deve ser positivo!")
+                return
+        except ValueError:
+            await ctx.send("❌ Use um número ou 'all'!")
+            return
+    
+    if amount > user_data['money']:
+        await ctx.send("❌ Saldo insuficiente!")
+        return
+    
+    if TEST_MODE:
+        user_id = str(ctx.author.id)
+        test_db['users'][user_id]['money'] -= amount
+        test_db['users'][user_id]['bank'] = test_db['users'][user_id].get('bank', 0) + amount
+    else:
+        with get_db() as conn:
+            conn.execute(
+                "UPDATE users SET money = money - ?, bank = bank + ? WHERE user_id = ?",
+                (amount, amount, ctx.author.id)
+            )
+            conn.commit()
+    
+    await ctx.send(f"🏦 {ctx.author.mention} depositou {format_currency(amount)} no banco!")
+
+# ================= COMANDOS DE MODERAÇÃO ADICIONAIS =================
+@bot.command(name='addrole')
+@commands.has_permissions(manage_roles=True)
+async def addrole(ctx, member: discord.Member, role: discord.Role):
+    """Adiciona um cargo a um membro"""
+    if role.position >= ctx.guild.me.top_role.position:
+        return await ctx.send("❌ Não posso adicionar este cargo (muito alto na hierarquia)!")
+    
+    await member.add_roles(role)
+    await ctx.send(f"✅ Cargo {role.name} adicionado a {member.mention}")
+    await registrar_log("add_role", ctx.author, member, f"Cargo: {role.name}")
+
+@bot.command(name='removerole')
+@commands.has_permissions(manage_roles=True)
+async def removerole(ctx, member: discord.Member, role: discord.Role):
+    """Remove um cargo de um membro"""
+    if role.position >= ctx.guild.me.top_role.position:
+        return await ctx.send("❌ Não posso remover este cargo (muito alto na hierarquia)!")
+    
+    await member.remove_roles(role)
+    await ctx.send(f"✅ Cargo {role.name} removido de {member.mention}")
+    await registrar_log("remove_role", ctx.author, member, f"Cargo: {role.name}")
+
+@bot.command(name='advertence')
+async def advertence(ctx, member: discord.Member = None):
+    """Mostra as advertências de um membro"""
+    member = member or ctx.author
+    if TEST_MODE:
+        warns = [w for w in test_db['warns'] if w['user_id'] == member.id]
+    else:
+        with get_db() as conn:
+            warns = conn.execute("SELECT reason, timestamp FROM warns WHERE user_id = ?", (member.id,)).fetchall()
+    
+    if not warns:
+        return await ctx.send(f"ℹ️ {member.mention} não possui advertências!")
+    
+    embed = discord.Embed(
+        title=f"⚠️ Advertências de {member.display_name}",
+        description=f"Total: {len(warns)}/3",
+        color=0xffcc00
+    )
+    
+    for i, warn in enumerate(warns, 1):
+        embed.add_field(
+            name=f"Advertência #{i}",
+            value=f"Motivo: {warn['reason']}\nData: {warn['timestamp']}",
+            inline=False
+        )
+    
+    await ctx.send(embed=embed)
+
+@bot.command(name='removeadvertence')
+@commands.has_permissions(kick_members=True)
+async def removeadvertence(ctx, member: discord.Member, warn_id: int):
+    """Remove uma advertência de um membro"""
+    if TEST_MODE:
+        initial_count = len(test_db['warns'])
+        test_db['warns'] = [w for w in test_db['warns'] if not (w['user_id'] == member.id and w['warn_id'] == warn_id)]
+        removed = initial_count != len(test_db['warns'])
+    else:
+        with get_db() as conn:
+            result = conn.execute("DELETE FROM warns WHERE user_id = ? AND warn_id = ?", (member.id, warn_id))
+            conn.commit()
+            removed = result.rowcount > 0
+    
+    if not removed:
+        await ctx.send(f"❌ Advertência #{warn_id} não encontrada para {member.mention}!")
+    else:
+        await ctx.send(f"✅ Advertência #{warn_id} removida de {member.mention}")
+        await registrar_log("remove_warn", ctx.author, member, f"Advertência ID: {warn_id}")
+
+@bot.command(name='mutecall')
+@commands.has_permissions(mute_members=True)
+async def mutecall(ctx, member: discord.Member):
+    """Muta um membro na call de voz"""
+    if not member.voice:
+        return await ctx.send("❌ O membro não está em uma call de voz!")
+    
+    await member.edit(mute=True)
+    await ctx.send(f"🔇 {member.mention} foi mutado na call de voz!")
+    await registrar_log("mute_call", ctx.author, member)
+
+@bot.command(name='unmutecall')
+@commands.has_permissions(mute_members=True)
+async def unmutecall(ctx, member: discord.Member):
+    """Desmuta um membro na call de voz"""
+    if not member.voice:
+        return await ctx.send("❌ O membro não está em uma call de voz!")
+    
+    await member.edit(mute=False)
+    await ctx.send(f"🔊 {member.mention} foi desmutado na call de voz!")
+    await registrar_log("unmute_call", ctx.author, member)
+
+@bot.command(name='unbanall')
+@commands.has_permissions(ban_members=True)
+async def unbanall(ctx):
+    """Desbane todos os membros banidos"""
+    banned_users = await ctx.guild.bans()
+    
+    if not banned_users:
+        return await ctx.send("ℹ️ Não há membros banidos para desbanir!")
+    
+    for ban_entry in banned_users:
+        await ctx.guild.unban(ban_entry.user)
+    
+    await ctx.send(f"✅ {len(banned_users)} membros foram desbanidos!")
+    await registrar_log("unban_all", ctx.author)
+
+# ================= COMANDOS DE STAFF EXPANDIDOS =================
+# Sistema de pontos para staff
+def init_staff_tables():
+    """Inicializa tabelas específicas para staff"""
+    if not TEST_MODE:
+        with get_db() as conn:
+            conn.execute("""
+            CREATE TABLE IF NOT EXISTS staff_points (
+                user_id INTEGER PRIMARY KEY,
+                migrations INTEGER DEFAULT 0,
+                movchats INTEGER DEFAULT 0,
+                movs INTEGER DEFAULT 0,
+                recruitments INTEGER DEFAULT 0,
+                registers INTEGER DEFAULT 0,
+                verifications INTEGER DEFAULT 0,
+                total_points INTEGER DEFAULT 0,
+                last_reset TEXT
+            )
+            """)
+            conn.commit()
+
+async def get_staff_data(user_id):
+    """Obtém dados de staff do usuário"""
+    if TEST_MODE:
+        return test_db.get('staff', {}).get(str(user_id), {
+            'migrations': 0, 'movchats': 0, 'movs': 0,
+            'recruitments': 0, 'registers': 0, 'verifications': 0,
+            'total_points': 0
+        })
+    else:
+        with get_db() as conn:
+            data = conn.execute(
+                "SELECT * FROM staff_points WHERE user_id = ?",
+                (user_id,)
+            ).fetchone()
+            
+            if not data:
+                conn.execute(
+                    "INSERT INTO staff_points (user_id) VALUES (?)",
+                    (user_id,)
+                )
+                conn.commit()
+                return {
+                    'migrations': 0, 'movchats': 0, 'movs': 0,
+                    'recruitments': 0, 'registers': 0, 'verifications': 0,
+                    'total_points': 0
+                }
+            
+            return {
+                'migrations': data['migrations'],
+                'movchats': data['movchats'],
+                'movs': data['movs'],
+                'recruitments': data['recruitments'],
+                'registers': data['registers'],
+                'verifications': data['verifications'],
+                'total_points': data['total_points']
+            }
+
+async def update_staff_points(user_id, category, points=1):
+    """Atualiza pontos de staff"""
+    if TEST_MODE:
+        if 'staff' not in test_db:
+            test_db['staff'] = {}
+        if str(user_id) not in test_db['staff']:
+            test_db['staff'][str(user_id)] = {
+                'migrations': 0, 'movchats': 0, 'movs': 0,
+                'recruitments': 0, 'registers': 0, 'verifications': 0,
+                'total_points': 0
+            }
+        
+        test_db['staff'][str(user_id)][category] += points
+        test_db['staff'][str(user_id)]['total_points'] += points
+    else:
+        with get_db() as conn:
+            conn.execute(f"""
+            INSERT INTO staff_points (user_id, {category}, total_points)
+            VALUES (?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                {category} = {category} + ?,
+                total_points = total_points + ?
+            """, (user_id, points, points, points, points))
+            conn.commit()
+
+@bot.command(name='migrar')
+@commands.has_permissions(move_members=True)
+async def migrar_membro(ctx, member: discord.Member, channel: discord.VoiceChannel):
+    """Migra um membro para outro canal de voz"""
+    if not member.voice:
+        await ctx.send("❌ O membro não está em um canal de voz!")
+        return
+    
+    old_channel = member.voice.channel.name
+    await member.move_to(channel)
+    await update_staff_points(ctx.author.id, 'migrations')
+    
+    embed = discord.Embed(
+        title="🔄 Migração Realizada",
+        description=f"{member.mention} foi movido para {channel.mention}",
+        color=0x00ff00
+    )
+    embed.add_field(name="De", value=old_channel, inline=True)
+    embed.add_field(name="Para", value=channel.name, inline=True)
+    embed.add_field(name="Staff", value=ctx.author.mention, inline=True)
+    
+    await ctx.send(embed=embed)
+    await registrar_log("migração", ctx.author, member, f"Para: {channel.name}")
+
+@bot.command(name='migracoes')
+async def ver_migracoes(ctx, member: discord.Member = None):
+    """Mostra estatísticas de migrações"""
+    member = member or ctx.author
+    staff_data = await get_staff_data(member.id)
+    
+    embed = discord.Embed(
+        title=f"🔄 Migrações - {member.display_name}",
+        color=0x3498db
+    )
+    embed.add_field(name="Total de Migrações", value=staff_data['migrations'], inline=True)
+    embed.add_field(name="Pontos Ganhos", value=f"{staff_data['migrations']} pts", inline=True)
+    embed.set_thumbnail(url=member.avatar.url)
+    
+    await ctx.send(embed=embed)
+
+@bot.command(name='movchat')
+@commands.has_permissions(manage_messages=True)
+async def mover_chat(ctx, member: discord.Member, channel: discord.TextChannel):
+    """Move conversa de um membro para outro canal"""
+    await update_staff_points(ctx.author.id, 'movchats')
+    
+    embed = discord.Embed(
+        title="💬 Chat Movido",
+        description=f"Conversa de {member.mention} direcionada para {channel.mention}",
+        color=0x9932cc
+    )
+    embed.add_field(name="Staff", value=ctx.author.mention, inline=True)
+    
+    await ctx.send(embed=embed)
+    await channel.send(f"👋 {member.mention}, continue sua conversa aqui!")
+    await registrar_log("mov_chat", ctx.author, member, f"Para: {channel.name}")
+
+@bot.command(name='mov')
+@commands.has_permissions(move_members=True)
+async def mover_geral(ctx, member: discord.Member, *, destino):
+    """Move membro (comando genérico)"""
+    await update_staff_points(ctx.author.id, 'movs')
+    
+    embed = discord.Embed(
+        title="↗️ Movimentação",
+        description=f"{member.mention} foi direcionado",
+        color=0x17a2b8
+    )
+    embed.add_field(name="Destino", value=destino, inline=True)
+    embed.add_field(name="Staff", value=ctx.author.mention, inline=True)
+    
+    await ctx.send(embed=embed)
+    await registrar_log("movimentação", ctx.author, member, f"Destino: {destino}")
+
+@bot.command(name='movpoints')
+async def ver_mov_points(ctx, member: discord.Member = None):
+    """Mostra pontos de movimentações"""
+    member = member or ctx.author
+    staff_data = await get_staff_data(member.id)
+    
+    embed = discord.Embed(
+        title=f"📊 Pontos de Movimentação - {member.display_name}",
+        color=0x17a2b8
+    )
+    embed.add_field(name="🔄 Migrações", value=staff_data['migrations'], inline=True)
+    embed.add_field(name="💬 MovChats", value=staff_data['movchats'], inline=True)
+    embed.add_field(name="↗️ Movs", value=staff_data['movs'], inline=True)
+    embed.add_field(name="🏆 Total", value=staff_data['total_points'], inline=False)
+    
+    await ctx.send(embed=embed)
+
+@bot.command(name='recrutar')
+@commands.has_permissions(manage_roles=True)
+async def recrutar_membro(ctx, member: discord.Member, *, cargo_ou_area):
+    """Recruta um membro para uma área"""
+    await update_staff_points(ctx.author.id, 'recruitments')
+    
+    embed = discord.Embed(
+        title="🎯 Recrutamento",
+        description=f"{member.mention} foi recrutado!",
+        color=0x28a745
+    )
+    embed.add_field(name="Área/Cargo", value=cargo_ou_area, inline=True)
+    embed.add_field(name="Recrutador", value=ctx.author.mention, inline=True)
+    embed.set_thumbnail(url=member.avatar.url)
+    
+    await ctx.send(embed=embed)
+    await registrar_log("recrutamento", ctx.author, member, f"Área: {cargo_ou_area}")
+
+@bot.command(name='recrutamentos')
+async def ver_recrutamentos(ctx, member: discord.Member = None):
+    """Mostra estatísticas de recrutamentos"""
+    member = member or ctx.author
+    staff_data = await get_staff_data(member.id)
+    
+    embed = discord.Embed(
+        title=f"🎯 Recrutamentos - {member.display_name}",
+        color=0x28a745
+    )
+    embed.add_field(name="Total Recrutados", value=staff_data['recruitments'], inline=True)
+    embed.add_field(name="Pontos Ganhos", value=f"{staff_data['recruitments']} pts", inline=True)
+    
+    await ctx.send(embed=embed)
+
+@bot.command(name='registers')
+async def ver_registros(ctx, member: discord.Member = None):
+    """Mostra estatísticas de registros"""
+    member = member or ctx.author
+    staff_data = await get_staff_data(member.id)
+    
+    embed = discord.Embed(
+        title=f"📝 Registros - {member.display_name}",
+        color=0x6f42c1
+    )
+    embed.add_field(name="Total Registros", value=staff_data['registers'], inline=True)
+    embed.add_field(name="Pontos Ganhos", value=f"{staff_data['registers']} pts", inline=True)
+    
+    await ctx.send(embed=embed)
+
+@bot.command(name='verificacoes')
+async def ver_verificacoes(ctx, member: discord.Member = None):
+    """Mostra estatísticas de verificações"""
+    member = member or ctx.author
+    staff_data = await get_staff_data(member.id)
+    
+    embed = discord.Embed(
+        title=f"✅ Verificações - {member.display_name}",
+        color=0x20c997
+    )
+    embed.add_field(name="Total Verificações", value=staff_data['verifications'], inline=True)
+    embed.add_field(name="Pontos Ganhos", value=f"{staff_data['verifications']} pts", inline=True)
+    
+    await ctx.send(embed=embed)
+
+# Comandos de reset para staff
+@bot.command(name='resetmigs')
+@commands.has_permissions(administrator=True)
+async def reset_migrations(ctx, member: discord.Member):
+    """Reseta contador de migrações de um staff"""
+    if TEST_MODE:
+        if str(member.id) in test_db.get('staff', {}):
+            test_db['staff'][str(member.id)]['migrations'] = 0
+    else:
+        with get_db() as conn:
+            conn.execute("UPDATE staff_points SET migrations = 0 WHERE user_id = ?", (member.id,))
+            conn.commit()
+    
+    await ctx.send(f"✅ Contador de migrações resetado para {member.mention}")
+
+@bot.command(name='resetmovchat')
+@commands.has_permissions(administrator=True)
+async def reset_movchats(ctx, member: discord.Member):
+    """Reseta contador de movchats de um staff"""
+    if TEST_MODE:
+        if str(member.id) in test_db.get('staff', {}):
+            test_db['staff'][str(member.id)]['movchats'] = 0
+    else:
+        with get_db() as conn:
+            conn.execute("UPDATE staff_points SET movchats = 0 WHERE user_id = ?", (member.id,))
+            conn.commit()
+    
+    await ctx.send(f"✅ Contador de movchats resetado para {member.mention}")
+
+@bot.command(name='resetmovs')
+@commands.has_permissions(administrator=True)
+async def reset_movs(ctx, member: discord.Member):
+    """Reseta contador de movs de um staff"""
+    if TEST_MODE:
+        if str(member.id) in test_db.get('staff', {}):
+            test_db['staff'][str(member.id)]['movs'] = 0
+    else:
+        with get_db() as conn:
+            conn.execute("UPDATE staff_points SET movs = 0 WHERE user_id = ?", (member.id,))
+            conn.commit()
+    
+    await ctx.send(f"✅ Contador de movs resetado para {member.mention}")
+
+@bot.command(name='resetrecs')
+@commands.has_permissions(administrator=True)
+async def reset_recruitments(ctx, member: discord.Member):
+    """Reseta contador de recrutamentos de um staff"""
+    if TEST_MODE:
+        if str(member.id) in test_db.get('staff', {}):
+            test_db['staff'][str(member.id)]['recruitments'] = 0
+    else:
+        with get_db() as conn:
+            conn.execute("UPDATE staff_points SET recruitments = 0 WHERE user_id = ?", (member.id,))
+            conn.commit()
+    
+    await ctx.send(f"✅ Contador de recrutamentos resetado para {member.mention}")
+
+@bot.command(name='resetregisters')
+@commands.has_permissions(administrator=True)
+async def reset_registers(ctx, member: discord.Member):
+    """Reseta contador de registros de um staff"""
+    if TEST_MODE:
+        if str(member.id) in test_db.get('staff', {}):
+            test_db['staff'][str(member.id)]['registers'] = 0
+    else:
+        with get_db() as conn:
+            conn.execute("UPDATE staff_points SET registers = 0 WHERE user_id = ?", (member.id,))
+            conn.commit()
+    
+    await ctx.send(f"✅ Contador de registros resetado para {member.mention}")
+
+@bot.command(name='resetverificacoes')
+@commands.has_permissions(administrator=True)
+async def reset_verifications(ctx, member: discord.Member):
+    """Reseta contador de verificações de um staff"""
+    if TEST_MODE:
+        if str(member.id) in test_db.get('staff', {}):
+            test_db['staff'][str(member.id)]['verifications'] = 0
+    else:
+        with get_db() as conn:
+            conn.execute("UPDATE staff_points SET verifications = 0 WHERE user_id = ?", (member.id,))
+            conn.commit()
+    
+    await ctx.send(f"✅ Contador de verificações resetado para {member.mention}")
+
+@bot.command(name='resettime')
+@commands.has_permissions(administrator=True)
+async def reset_all_staff(ctx, member: discord.Member):
+    """Reseta TODOS os contadores de um staff"""
+    if TEST_MODE:
+        if str(member.id) in test_db.get('staff', {}):
+            test_db['staff'][str(member.id)] = {
+                'migrations': 0, 'movchats': 0, 'movs': 0,
+                'recruitments': 0, 'registers': 0, 'verifications': 0,
+                'total_points': 0
+            }
+    else:
+        with get_db() as conn:
+            conn.execute("""
+            UPDATE staff_points 
+            SET migrations = 0, movchats = 0, movs = 0, 
+                recruitments = 0, registers = 0, verifications = 0, 
+                total_points = 0,
+                last_reset = ?
+            WHERE user_id = ?
+            """, (datetime.now().strftime('%Y-%m-%d %H:%M:%S'), member.id))
+            conn.commit()
+    
+    await ctx.send(f"🔄 TODOS os contadores foram resetados para {member.mention}!")
+    await registrar_log("reset_completo", ctx.author, member)
+
+# ================= COMANDOS DE PERFIL/RANKING =================
+@bot.command(name='perfil')
+
+async def perfil(ctx):
+    """Mostra o perfil completo do usuário"""
+    try:
+        if TEST_MODE:
+            user_id = str(ctx.author.id)
+            if user_id not in test_db['users']:
+                user_data = {
+                    'level': 1,
+                    'xp': 0,
+                    'money': 0,
+                    'rep': 0,
+                    'vip_level': 0,
+                    'about_me': None
+                }
+            else:
+                user_data = {
+                    'level': test_db['users'][user_id].get('level', 1),
+                    'xp': test_db['users'][user_id].get('xp', 0),
+                    'money': test_db['users'][user_id].get('money', 0),
+                    'rep': test_db['users'][user_id].get('rep', 0),
+                    'vip_level': test_db['users'][user_id].get('vip_level', 0),
+                    'about_me': test_db['users'][user_id].get('about_me')
+                }
+        else:
+            with get_db() as conn:
+                user = conn.execute(
+                    "SELECT * FROM users WHERE user_id = ?", 
+                    (ctx.author.id,)
+                ).fetchone()
+            
+            if not user:
+                user_data = {
+                    'level': 1,
+                    'xp': 0,
+                    'money': 0,
+                    'rep': 0,
+                    'vip_level': 0,
+                    'about_me': None
+                }
+            else:
+                user_data = {
+                    'level': user['level'],
+                    'xp': user['xp'],
+                    'money': user['money'],
+                    'rep': user['rep'],
+                    'vip_level': user['vip_level'],
+                    'about_me': user['about_me']
+                }
+
+        embed = discord.Embed(
+            title=f"Perfil de {ctx.author.display_name}",
+            color=0x00ff00
+        )
+        embed.add_field(name="🏆 Nível", value=user_data['level'], inline=True)
+        embed.add_field(name="✨ XP", value=f"{user_data['xp']}/{user_data['level'] * 100}", inline=True)
+        embed.add_field(name="💰 Moedas", value=user_data['money'], inline=True)
+        embed.add_field(name="🌟 Reputação", value=user_data['rep'], inline=True)
+        embed.add_field(name="💎 VIP", value="Sim" if user_data['vip_level'] > 0 else "Não", inline=True)
+        
+        if user_data['about_me']:
+            embed.add_field(name="📝 Sobre", value=user_data['about_me'], inline=False)
+            
+        embed.set_thumbnail(url=ctx.author.avatar.url)
+        
+        await ctx.send(embed=embed)
+        
+    except Exception as e:
+        await ctx.send("❌ Erro ao carregar perfil")
+        print(f"Erro no comando perfil: {e}")
+
+@bot.command(name='top')
+async def top(ctx):
+    """Mostra o ranking de membros"""
+    try:
+        if TEST_MODE:
+            users = []
+            for user_id, data in test_db['users'].items():
+                try:
+                    member = ctx.guild.get_member(int(user_id))
+                    if member:
+                        users.append({
+                            'user_id': user_id,
+                            'level': data.get('level', 1),
+                            'xp': data.get('xp', 0),
+                            'money': data.get('money', 0),
+                            'member': member
+                        })
+                except ValueError:
+                    continue
+            
+            top_users = sorted(users, key=lambda x: (-x['level'], -x['xp']))[:10]
+        else:
+            with get_db() as conn:
+                top_users = conn.execute(
+                    "SELECT user_id, level, xp, money FROM users ORDER BY level DESC, xp DESC LIMIT 10"
+                ).fetchall()
+            
+            top_users = [{
+                'user_id': str(user['user_id']),
+                'level': user['level'],
+                'xp': user['xp'],
+                'money': user['money'],
+                'member': ctx.guild.get_member(int(user['user_id']))
+            } for user in top_users]
+        
+        embed = discord.Embed(
+            title="🏆 Top 10 por nível",
+            color=0xffd700
+        )
+        
+        for i, user in enumerate(top_users, 1):
+            if user['member']:
+                embed.add_field(
+                    name=f"{i}. {user['member'].display_name}",
+                    value=f"Nível {user['level']} | XP {user['xp']} | 💰 {user['money']}",
+                    inline=False
+                )
+        
+        await ctx.send(embed=embed)
+        
+    except Exception as e:
+        await ctx.send("❌ Erro ao carregar ranking")
+        print(f"Erro no comando top: {e}")
+
+# ================= COMANDO RESTART =================
+    
+    await ctx.send(embed=embed)
+
+@bot.safe_command('debug')  # ← Modificado aqui
+@commands.is_owner()
+async def debug(ctx, action: str = "status"):
+    """Sistema de debug avançado"""
+    
+    if action == "status":
+        embed = discord.Embed(
+            title="🔧 DEBUG - STATUS DO SISTEMA",
+            color=0xff9900
+        )
+        
+        # Estatísticas de cache
+        embed.add_field(
+            name="💾 Cache de Usuários", 
+            value=f"{len(user_cache)} entradas ativas",
+            inline=True
+        )
+        
+        # Estatísticas de comandos
+        total_executions = sum(len(execs) for execs in command_executions.values())
+        embed.add_field(
+            name="⚡ Execuções de Comandos", 
+            value=f"{total_executions} na última hora",
+            inline=True
+        )
+        
+        # Sistema de processamento
+        embed.add_field(
+            name="🔄 Processamento Ativo", 
+            value=f"{len(help_manager.processing_users)} comandos !f processando",
+            inline=True
+        )
+        
+        # Mensagens registradas
+        embed.add_field(
+            name="📨 Mensagens Ativas", 
+            value=f"{len(help_manager.active_panels)} painéis ativos",
+            inline=True
+        )
+        
+        # Duplicações detectadas
+        embed.add_field(
+            name="🚨 Duplicações Detectadas", 
+            value=f"{len(duplicate_alerts)} alertas",
+            inline=True
+        )
+        
+        # Uptime
+        embed.add_field(
+            name="🕐 Status", 
+            value="Sistema funcionando normalmente",
+            inline=True
+        )
+        
+        await ctx.send(embed=embed)
+    
+    elif action == "logs":
+        # Mostra logs de execuções recentes
+        embed = discord.Embed(
+            title="📋 DEBUG - LOGS DE COMANDOS",
+            color=0x00ff00
+        )
+        
+        log_lines = []
+        for key, executions in list(command_executions.items())[-10:]:  # Últimas 10
+            if executions:
+                command_name = key.split('_')[0]
+                user_id = key.split('_')[1]
+                count = len(executions)
+                last_exec = executions[-1]['timestamp']
+                time_ago = (datetime.now() - last_exec).seconds
+                
+                log_lines.append(f"`{command_name}` - User {user_id} - {count}x - {time_ago}s atrás")
+        
+        embed.description = "\\n".join(log_lines) if log_lines else "Nenhuma execução recente"
+        await ctx.send(embed=embed)
+    
+    elif action == "clear":
+        # Limpa todos os dados de debug
+        command_executions.clear()
+        duplicate_alerts.clear()
+        # Sistema antigo removido - usa singleton help_manager
+        user_cache.clear()
+        
+        # Limpa também o sistema novo
+        async with help_manager._lock:
+            help_manager.active_panels.clear()
+            help_manager.processing_users.clear()
+            help_manager.last_request.clear()
+        
+        logging.info("Sistema de debug limpo pelo administrador")
+        await ctx.send("🧹 **Debug limpo!** Todos os dados foram resetados.")
+    
+    elif action == "test":
+        # Teste de sistema
+        test_results = []
+        
+        # Teste 1: Cache
+        try:
+            test_data = await get_cached_user_data(ctx.author.id)
+            test_results.append("✅ Cache funcionando")
+        except:
+            test_results.append("❌ Cache com erro")
+        
+        # Teste 2: Logging
+        try:
+            logging.info("Teste de logging executado")
+            test_results.append("✅ Logging funcionando")
+        except:
+            test_results.append("❌ Logging com erro")
+        
+        # Teste 3: Database
+        try:
+            with get_db() as conn:
+                conn.execute("SELECT 1").fetchone()
+            test_results.append("✅ Database funcionando")
+        except:
+            test_results.append("❌ Database com erro")
+        
+        embed = discord.Embed(
+            title="🧪 TESTE DE SISTEMA",
+            description="\\n".join(test_results),
+            color=0x00ffff
+        )
+        await ctx.send(embed=embed)
+    
+    else:
+        await ctx.send("❌ **Ações disponíveis:** `status`, `logs`, `clear`, `test`")
+
+@bot.command(name='commandstats')
+@commands.is_owner()
+async def command_stats(ctx):
+    """Mostra estatísticas detalhadas de comandos (apenas dono)"""
+    
+    if not command_executions:
+        await ctx.send("📊 Nenhuma estatística de comando disponível.")
+        return
+    
+    # Analisa dados
+    stats = {}
+    for key, executions in command_executions.items():
+        command_name = key.split('_')[0]
+        if command_name not in stats:
+            stats[command_name] = {
+                'total': 0,
+                'users': set(),
+                'duplicates': 0
+            }
+        
+        stats[command_name]['total'] += len(executions)
+        stats[command_name]['users'].add(key.split('_')[1])
+        
+        # Detecta duplicações
+        if len(executions) > 1:
+            for i in range(1, len(executions)):
+                time_diff = (executions[i]['timestamp'] - executions[i-1]['timestamp']).total_seconds()
+                if time_diff < 3:
+                    stats[command_name]['duplicates'] += 1
+    
+    # Cria embed
+    embed = discord.Embed(
+        title="📊 ESTATÍSTICAS DE COMANDOS",
+        color=0x9932cc
+    )
+    
+    sorted_stats = sorted(stats.items(), key=lambda x: x[1]['total'], reverse=True)
+    
+    for command, data in sorted_stats[:15]:  # Top 15
+        value = f"**Execuções:** {data['total']}\\n**Usuários únicos:** {len(data['users'])}\\n**Duplicações:** {data['duplicates']}"
+        embed.add_field(
+            name=f"`!{command}`",
+            value=value,
+            inline=True
+        )
+    
+    embed.set_footer(text=f"Dados dos últimos 60 minutos • {len(stats)} comandos analisados")
+    await ctx.send(embed=embed)
+
+# ================= COMANDOS SOCIAIS EXPANDIDOS =================
+@bot.command(name='sobremim')
+async def sobre_mim(ctx, *, texto=None):
+    """Define ou mostra informações sobre você"""
+    if not texto:
+        # Mostra o 'sobre mim' atual
+        user_data = await get_user_data(ctx.author.id)
+        about = user_data.get('about_me') or "Nenhuma descrição definida"
+        
+        embed = discord.Embed(
+            title=f"📋 Sobre {ctx.author.display_name}",
+            description=about,
+            color=0x00ff00
+        )
+        embed.set_thumbnail(url=ctx.author.avatar.url)
+        await ctx.send(embed=embed)
+    else:
+        # Define novo 'sobre mim'
+        if len(texto) > 500:
+            await ctx.send("❌ Descrição muito longa! Máximo 500 caracteres.")
+            return
+            
+        if TEST_MODE:
+            user_id = str(ctx.author.id)
+            if user_id not in test_db['users']:
+                test_db['users'][user_id] = {}
+            test_db['users'][user_id]['about_me'] = texto
+        else:
+            with get_db() as conn:
+                conn.execute(
+                    "INSERT INTO users (user_id, about_me) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET about_me = ?",
+                    (ctx.author.id, texto, texto)
+                )
+                conn.commit()
+        
+        await ctx.send(f"✅ Sua descrição foi atualizada para: **{texto}**")
+
+@bot.command(name='influencer')
+async def influencer_stats(ctx, member: discord.Member = None):
+    """Mostra estatísticas de influenciador no servidor"""
+    member = member or ctx.author
+    
+    # Calcula estatísticas baseadas em atividade
+    messages_sent = 0
+    reactions_received = 0
+    
+    # Simula dados (em produção, você coletaria dados reais)
+    async for message in ctx.channel.history(limit=100):
+        if message.author == member:
+            messages_sent += 1
+            reactions_received += len(message.reactions)
+    
+    influence_score = (messages_sent * 2) + (reactions_received * 5)
+    
+    embed = discord.Embed(
+        title=f"📈 Stats de Influenciador - {member.display_name}",
+        color=0xff69b4
+    )
+    embed.add_field(name="📱 Mensagens Enviadas", value=messages_sent, inline=True)
+    embed.add_field(name="❤️ Reações Recebidas", value=reactions_received, inline=True)
+    embed.add_field(name="🌟 Pontuação de Influência", value=influence_score, inline=False)
+    
+    if influence_score >= 100:
+        embed.add_field(name="🏆 Status", value="MEGA INFLUENCER!", inline=False)
+    elif influence_score >= 50:
+        embed.add_field(name="🥇 Status", value="Influencer Ativo", inline=False)
+    else:
+        embed.add_field(name="📊 Status", value="Influencer Iniciante", inline=False)
+    
+    embed.set_thumbnail(url=member.avatar.url)
+    await ctx.send(embed=embed)
+
+# Sistema Tellonym com botões interativos
+class TellonymView(discord.ui.View):
+    def __init__(self, post_author):
+        super().__init__(timeout=300)
+        self.post_author = post_author
+        self.likes = set()
+        self.comments = []
+    
+    @discord.ui.button(label="❤️ Curtir", style=discord.ButtonStyle.red)
+    async def like_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        user_id = interaction.user.id
+        if user_id in self.likes:
+            self.likes.remove(user_id)
+            button.label = f"❤️ Curtir ({len(self.likes)})"
+            await interaction.response.edit_message(view=self)
+        else:
+            self.likes.add(user_id)
+            button.label = f"❤️ Curtir ({len(self.likes)})"
+            await interaction.response.edit_message(view=self)
+    
+    @discord.ui.button(label="💬 Comentar", style=discord.ButtonStyle.grey)
+    async def comment_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(CommentModal(self))
+    
+    @discord.ui.button(label="🗑️ Apagar", style=discord.ButtonStyle.red)
+    async def delete_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Só o autor ou moderadores podem apagar
+        if interaction.user.id == self.post_author or interaction.user.guild_permissions.manage_messages:
+            await interaction.response.edit_message(content="**Post deletado pelo autor/moderador**", embed=None, view=None)
+        else:
+            await interaction.response.send_message("❌ Você não tem permissão para deletar este post!", ephemeral=True)
+
+class CommentModal(discord.ui.Modal, title="Comentar anonimamente"):
+    def __init__(self, view):
+        super().__init__()
+        self.view = view
+    
+    comment = discord.ui.TextInput(
+        label="Seu comentário anônimo:",
+        placeholder="Digite seu comentário aqui...",
+        style=discord.TextStyle.paragraph,
+        max_length=200
+    )
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        self.view.comments.append(f"**Anônimo:** {self.comment.value}")
+        
+        embed = discord.Embed(
+            title="💬 Comentários",
+            description="\n\n".join(self.view.comments[-5:]),  # Últimos 5 comentários
+            color=0x00ffff
+        )
+        if len(self.view.comments) > 5:
+            embed.set_footer(text=f"Mostrando os 5 comentários mais recentes de {len(self.view.comments)} total")
+        
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.command(name='tellonym')
+async def tellonym_post(ctx, *, mensagem):
+    """Posta uma mensagem anônima com sistema de interações"""
+    embed = discord.Embed(
+        title="📝 Post Anônimo",
+        description=mensagem,
+        color=0x9932cc,
+        timestamp=datetime.now(timezone.utc)
+    )
+    embed.set_footer(text="Sistema Tellonym • Clique nos botões para interagir")
+    
+    view = TellonymView(ctx.author.id)
+    await ctx.message.delete()  # Remove a mensagem original para manter anonimato
+    await ctx.send(embed=embed, view=view)
+
+# Sistema Instagram com foto e interações
+class InstagramView(discord.ui.View):
+    def __init__(self, post_author):
+        super().__init__(timeout=600)
+        self.post_author = post_author
+        self.likes = set()
+        self.comments = []
+    
+    @discord.ui.button(label="❤️ 0", style=discord.ButtonStyle.red)
+    async def like_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Botão de curtir com logging para debug"""
+        try:
+            user_id = interaction.user.id
+            logger_main.debug(f"Like button clicked by user {user_id}")
+            
+            if user_id in self.likes:
+                self.likes.remove(user_id)
+                button.label = f"❤️ {len(self.likes)}"
+                logger_main.debug(f"User {user_id} removed like, total: {len(self.likes)}")
+            else:
+                self.likes.add(user_id)
+                button.label = f"❤️ {len(self.likes)}"
+                logger_main.debug(f"User {user_id} added like, total: {len(self.likes)}")
+            
+            await interaction.response.edit_message(view=self)
+            logger_main.debug(f"Like button interaction completed successfully for user {user_id}")
+            
+        except Exception as e:
+            logger_main.error(f"Erro no like button: {e}")
+            try:
+                await interaction.response.send_message("❌ Erro ao processar curtida!", ephemeral=True)
+            except:
+                pass
+    
+    @discord.ui.button(label="💬 Comentar", style=discord.ButtonStyle.grey)
+    async def comment_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(InstagramCommentModal(self, interaction.user))
+    
+    @discord.ui.button(label="👁️ Ver Curtidas", style=discord.ButtonStyle.green)
+    async def view_likes(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.likes:
+            await interaction.response.send_message("Nenhuma curtida ainda!", ephemeral=True)
+            return
+        
+        users = []
+        for user_id in list(self.likes)[:10]:  # Máximo 10
+            user = interaction.guild.get_member(user_id)
+            if user:
+                users.append(user.display_name)
+        
+        embed = discord.Embed(
+            title=f"❤️ Curtidas ({len(self.likes)})",
+            description="\n".join(users),
+            color=0xff1493
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+    
+    @discord.ui.button(label="💬 Ver Comentários", style=discord.ButtonStyle.blurple)
+    async def view_comments(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.comments:
+            await interaction.response.send_message("Nenhum comentário ainda!", ephemeral=True)
+            return
+        
+        embed = discord.Embed(
+            title=f"💬 Comentários ({len(self.comments)})",
+            description="\n\n".join(self.comments[-10:]),  # Últimos 10
+            color=0x00bfff
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+    
+    @discord.ui.button(label="🗑️ Deletar", style=discord.ButtonStyle.red)
+    async def delete_post(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id == self.post_author or interaction.user.guild_permissions.manage_messages:
+            await interaction.response.edit_message(
+                content="**📸 Post deletado**", 
+                embed=None, 
+                view=None
+            )
+        else:
+            await interaction.response.send_message("❌ Só o autor ou moderadores podem deletar!", ephemeral=True)
+
+class InstagramCommentModal(discord.ui.Modal, title="Comentar no post"):
+    def __init__(self, view, user):
+        super().__init__()
+        self.view = view
+        self.user = user
+    
+    comment = discord.ui.TextInput(
+        label="Seu comentário:",
+        placeholder="Digite seu comentário...",
+        style=discord.TextStyle.short,
+        max_length=150
+    )
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        self.view.comments.append(f"**{self.user.display_name}:** {self.comment.value}")
+        await interaction.response.send_message("💬 Comentário adicionado!", ephemeral=True)
+
+@bot.command(name='instagram')
+async def instagram_post(ctx, url_imagem=None, *, legenda=""):
+    """Posta uma foto estilo Instagram com sistema completo de interações"""
+    if not url_imagem:
+        if ctx.message.attachments:
+            url_imagem = ctx.message.attachments[0].url
+        else:
+            await ctx.send("❌ Forneça uma URL de imagem ou anexe uma foto!")
+            return
+    
+    embed = discord.Embed(
+        title=f"📸 Post de {ctx.author.display_name}",
+        description=legenda if legenda else "*Sem legenda*",
+        color=0xe4405f,
+        timestamp=datetime.now(timezone.utc)
+    )
+    embed.set_image(url=url_imagem)
+    embed.set_author(name=ctx.author.display_name, icon_url=ctx.author.avatar.url)
+    embed.set_footer(text="📱 Instagram Bot • Interaja com os botões")
+    
+    view = InstagramView(ctx.author.id)
+    await ctx.send(embed=embed, view=view)
+
+@bot.command(name='ping')
+async def ping_command(ctx):
+    """Mostra a latência do bot"""
+    latency = round(bot.latency * 1000)
+    embed = discord.Embed(
+        title="🏓 Pong!",
+        description=f"Latência: **{latency}ms**",
+        color=0x00ff00 if latency < 100 else 0xff9900 if latency < 200 else 0xff0000
+    )
+    await ctx.send(embed=embed)
+
+@bot.command(name='restart')
+@commands.is_owner()
+async def restart_bot(ctx):
+    """Reinicia o bot (apenas dono)"""
+    embed = discord.Embed(
+        title="🔄 Reiniciando Bot...",
+        description="O bot está sendo reiniciado pelo dono.",
+        color=0xff9900
+    )
+    embed.set_thumbnail(url=bot.user.avatar.url)
+    embed.set_footer(text=f"Solicitado por {ctx.author.display_name}", icon_url=ctx.author.avatar.url)
+    
+    await ctx.send(embed=embed)
+    await ctx.send("⚠️ O bot será reiniciado agora!")
+    os.execv(sys.executable, ['python'] + [__file__])
+
+@bot.command(name='reload')
+@commands.is_owner()
+async def reload_bot(ctx):
+    """Recarrega o bot completamente (apenas dono)"""
+    await ctx.send("🔄 Recarregando bot...")
+    
+    # Limpa cache
+    user_cache.clear()
+    
+    # Executa o arquivo novamente
+    os.execv(sys.executable, ['python'] + [__file__])
+
+@bot.command(name='forceclear')
+@commands.is_owner()
+async def force_clear_help(ctx):
+    """Força limpeza completa do sistema de ajuda profissional"""
+    # Reset completo do singleton
+    async with help_manager._lock:
+        # Deleta todos os painéis ativos
+        for user_id, message in list(help_manager.active_panels.items()):
+            try:
+                await message.delete()
+            except:
+                pass
+        
+        # Limpa todos os registros
+        help_manager.active_panels.clear()
+        help_manager.processing_users.clear()
+        help_manager.last_request.clear()
+    
+    # Limpa painéis no canal atual (backup)
+    deleted = 0
+    async for msg in ctx.channel.history(limit=50):
+        if (msg.author == bot.user and msg.embeds and 
+            "PAINEL DE AJUDA" in str(msg.embeds[0].title)):
+            try:
+                await msg.delete()
+                deleted += 1
+            except:
+                pass
+    
+    await ctx.send(f"🧹 **LIMPEZA FORÇADA CONCLUÍDA v3.0**\\n- Sistema singleton resetado\\n- {deleted} painéis do canal removidos\\n- Todas as sessões limpas")
+
+@bot.safe_command('helpstatus')  # SISTEMA PROFISSIONAL v3.0
+@commands.is_owner()
+async def helpstatus(ctx):
+    """Status do sistema de ajuda profissional com singleton"""
+    status = help_manager.get_status() if 'help_manager' in globals() else {}
+    
+    embed = discord.Embed(
+        title="📌 STATUS DO SISTEMA DE AJUDA v3.0 PROFISSIONAL",
+        description="**Sistema Singleton + Circuit Breaker**",
+        color=0x00ff00
+    )
+    
+    # Status atual
+    embed.add_field(name="🔄 Processamentos Ativos", value=status.get('processing_users', 0), inline=True)
+    embed.add_field(name="📨 Painéis Ativos", value=status.get('active_panels', 0), inline=True)
+    embed.add_field(name="🔒 Singleton Lock", value="✅ ATIVO", inline=True)
+    
+    # Lista usuários com painéis
+    if status.get('users_with_panels'):
+        users_list = ", ".join([f"<@{uid}>" for uid in status['users_with_panels'][:5]])
+        if len(status['users_with_panels']) > 5:
+            users_list += f" ... e mais {len(status['users_with_panels']) - 5}"
+        embed.add_field(name="👥 Usuários com Painéis", value=users_list, inline=False)
+    
+    # Lista usuários processando
+    if status.get('users_processing'):
+        processing_list = ", ".join([f"<@{uid}>" for uid in status['users_processing']])
+        embed.add_field(name="⚙️ Processando Agora", value=processing_list, inline=False)
+    
+    embed.set_footer(text="✅ Sistema v3.0: Singleton Pattern + Circuit Breaker + Zero Duplicação")
+    await ctx.send(embed=embed)
+
+@bot.command(name='debug')
+@commands.is_owner()
+async def debug_command(ctx, action: str = "status"):
+    """Sistema de debug avançado (apenas dono)"""
+    
+    if action == "status":
+        embed = discord.Embed(
+            title="🔧 DEBUG - STATUS DO SISTEMA",
+            color=0xff9900
+        )
+        
+        # Estatísticas de cache
+        embed.add_field(
+            name="💾 Cache de Usuários", 
+            value=f"{len(user_cache)} entradas ativas",
+            inline=True
+        )
+        
+    
+        
+        await ctx.send(embed=embed)
+    
+    elif action == "logs":
+        # Mostra logs de execuções recentes
+        embed = discord.Embed(
+            title="📋 DEBUG - LOGS DE COMANDOS",
+            color=0x00ff00
+        )
+        
+        log_lines = []
+        for key, executions in list(command_executions.items())[-10:]:  # Últimas 10
+            if executions:
+                command_name = key.split('_')[0]
+                user_id = key.split('_')[1]
+                count = len(executions)
+                last_exec = executions[-1]['timestamp']
+                time_ago = (datetime.now() - last_exec).seconds
+                
+                log_lines.append(f"`{command_name}` - User {user_id} - {count}x - {time_ago}s atrás")
+        
+        embed.description = "\\n".join(log_lines) if log_lines else "Nenhuma execução recente"
+        await ctx.send(embed=embed)
+    
+    elif action == "clear":
+        # Limpa todos os dados de debug
+        command_executions.clear()
+        duplicate_alerts.clear()
+        # Sistema antigo removido - usa singleton help_manager
+        user_cache.clear()
+        
+        logger.log("Sistema de debug limpo pelo administrador", level="INFO")
+        await ctx.send("🧹 **Debug limpo!** Todos os dados foram resetados.")
+    
+    elif action == "test":
+        # Teste de sistema
+        test_results = []
+        
+        # Teste 1: Cache
+        try:
+            test_data = await get_cached_user_data(ctx.author.id)
+            test_results.append("✅ Cache funcionando")
+        except:
+            test_results.append("❌ Cache com erro")
+        
+        # Teste 2: Logging
+        try:
+            logger.log("Teste de logging executado", level="INFO")
+            test_results.append("✅ Logging funcionando")
+        except:
+            test_results.append("❌ Logging com erro")
+        
+        # Teste 3: Database
+        try:
+            with get_db() as conn:
+                conn.execute("SELECT 1").fetchone()
+            test_results.append("✅ Database funcionando")
+        except:
+            test_results.append("❌ Database com erro")
+        
+        embed = discord.Embed(
+            title="🧪 TESTE DE SISTEMA",
+            description="\\n".join(test_results),
+            color=0x00ffff
+        )
+        await ctx.send(embed=embed)
+    
+    else:
+        await ctx.send("❌ **Ações disponíveis:** `status`, `logs`, `clear`, `test`")
+
+
+
+# ================= COMANDOS SOCIAIS =================
+@bot.command(name='avatar')
+async def avatar(ctx, member: discord.Member = None):
+    """Mostra o avatar de um membro em alta resolução"""
+    member = member or ctx.author
+    embed = discord.Embed(
+        title=f"🖼️ Avatar de {member.display_name}",
+        color=0x00ffff
+    )
+    embed.set_image(url=member.avatar.url)
+    await ctx.send(embed=embed)
+
+@bot.command(name='rep')
+async def rep(ctx, member: discord.Member):
+    """Dá reputação para um membro"""
+    if member.id == ctx.author.id:
+        await ctx.send("❌ Você não pode dar rep para si mesmo!")
+        return
+    
+    cooldown = 86400  # 24 horas
+    last_rep = test_db['users'].get(str(ctx.author.id), {}).get('last_rep') if TEST_MODE else None
+    
+    if last_rep and (datetime.now() - datetime.strptime(last_rep, '%Y-%m-%d %H:%M:%S')).seconds < cooldown:
+        await ctx.send("⏳ Você só pode dar rep uma vez por dia!")
+        return
+    
+    if TEST_MODE:
+        user_id = str(member.id)
+        if user_id not in test_db['users']:
+            test_db['users'][user_id] = {'rep': 0}
+        test_db['users'][user_id]['rep'] = test_db['users'][user_id].get('rep', 0) + 1
+        
+        # Registrar cooldown
+        author_id = str(ctx.author.id)
+        if author_id not in test_db['users']:
+            test_db['users'][author_id] = {}
+        test_db['users'][author_id]['last_rep'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    else:
+        with get_db() as conn:
+            conn.execute(
+                "UPDATE users SET rep = rep + 1 WHERE user_id = ?",
+                (member.id,)
+            )
+            # Registrar cooldown
+            conn.execute(
+                "UPDATE users SET last_rep = ? WHERE user_id = ?",
+                (datetime.now().strftime('%Y-%m-%d %H:%M:%S'), ctx.author.id)
+            )
+            conn.commit()
+    
+    await ctx.send(f"🌟 {ctx.author.mention} deu +1 de reputação para {member.mention}!")
+
+# ================= UTILITÁRIOS =================
+@bot.command(name='membersrole')
+async def membersrole(ctx, role: discord.Role):
+    """Lista todos os membros com um determinado cargo"""
+    members = [member for member in ctx.guild.members if role in member.roles]
+    
+    if not members:
+        await ctx.send(f"❌ Nenhum membro encontrado com o cargo {role.name}!")
+        return
+    
+    embed = discord.Embed(
+        title=f"👥 Membros com o cargo {role.name}",
+        description="\n".join([member.mention for member in members]),
+        color=role.color
+    )
+    embed.set_footer(text=f"Total: {len(members)} membros")
+    
+    await ctx.send(embed=embed)
+
+# ================= COMANDOS ADICIONAIS =================
+@bot.command(name='clear')
+@commands.has_permissions(manage_messages=True)
+async def clear_messages(ctx, limite: int = 50):
+    """Alias para o comando cl"""
+    await limpar(ctx, limite)
+
+@bot.command(name='botinfo')
+async def bot_info_alias(ctx):
+    """Alias para o comando linfo"""
+    await linfo(ctx)
+
+# ================= OTIMIZAÇÕES E CORREÇÕES =================
+
+# Inicializa tabelas de staff quando o bot inicia
+def init_all_tables():
+    """Inicializa todas as tabelas necessárias"""
+    init_db()
+    init_perm_db()
+    if not TEST_MODE:
+        init_staff_tables()
+        print("✅ Todas as tabelas inicializadas")
+
+# Sistema de cache para melhor performance
+user_cache = {}
+cache_timeout = 300  # 5 minutos
+
+async def get_cached_user_data(user_id):
+    """Busca dados do usuário com cache para otimizar performance"""
+    current_time = datetime.now().timestamp()
+    
+    # Verifica se existe cache válido
+    if user_id in user_cache:
+        cache_entry = user_cache[user_id]
+        if current_time - cache_entry['timestamp'] < cache_timeout:
+            return cache_entry['data']
+    
+    # Busca dados atualizados
+    user_data = await get_user_data(user_id)
+    
+    # Atualiza cache
+    user_cache[user_id] = {
+        'data': user_data,
+        'timestamp': current_time
+    }
+    
+    return user_data
+
+# Função para limpar cache periodicamente
+@tasks.loop(minutes=30)
+async def clear_cache():
+    """Limpa cache antigo para evitar uso excessivo de memória"""
+    current_time = datetime.now().timestamp()
+    expired_keys = []
+    
+    # Limpa cache de usuários
+    for user_id, cache_entry in user_cache.items():
+        if current_time - cache_entry['timestamp'] > cache_timeout:
+            expired_keys.append(user_id)
+    
+    for key in expired_keys:
+        del user_cache[key]
+    
+    # Limpa dados de debug antigos
+    debug_expired = []
+    cutoff_time_debug = current_time - 3600  # 1 hora
+    
+    for key in list(command_executions.keys()):
+        command_executions[key] = [
+            exec_data for exec_data in command_executions[key]
+            if (current_time - exec_data['timestamp'].timestamp()) < 3600
+        ]
+        if not command_executions[key]:
+            debug_expired.append(key)
+    
+    for key in debug_expired:
+        del command_executions[key]
+    
+    # Limpa alertas de duplicação antigos
+    alert_expired = []
+    for alert_key in duplicate_alerts:
+        # Remove alertas de mais de 1 hora
+        if len(alert_key.split('_')) >= 3:
+            try:
+                alert_minute = int(alert_key.split('_')[-1])
+                current_minute = datetime.now().minute
+                if abs(current_minute - alert_minute) > 30:  # 30 minutos
+                    alert_expired.append(alert_key)
+            except:
+                alert_expired.append(alert_key)
+    
+    for key in alert_expired:
+        del duplicate_alerts[key]
+    
+    # Sistema antigo removido - o singleton help_manager já gerencia limpeza automática
+    
+    if expired_keys or debug_expired or alert_expired:
+        logging.info(f"Cache limpo: {len(expired_keys)} usuários, {len(debug_expired)} debug, {len(alert_expired)} alertas")
+
+# ================= INICIALIZAÇÃO =================
+@bot.event
+async def on_ready():
+    """Executa quando o bot está pronto"""
+    print(f'✅ Bot {bot.user} conectado com sucesso!')
+    print(f'📂 Caminho do banco de dados: {DB_PATH}')
+    
+    # Inicializa o banco de permissões
+    try:
+        init_perm_db()
+        print("✅ Banco de permissões inicializado")
+    except Exception as e:
+        print(f"❌ Erro ao iniciar banco de permissões: {e}")
+
+    # Verificação robusta do banco de dados
+    print("Testando conexão com o banco de dados...")
+    try:
+        with get_db() as conn:
+            # Testa uma consulta simples e verifica estrutura
+            conn.execute("SELECT 1").fetchone()
+            
+            # Verifica se as tabelas essenciais existem
+            cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            tabelas = [row['name'] for row in cursor]
+            tabelas_essenciais = {'users', 'warns', 'families'}
+            
+            if not tabelas_essenciais.issubset(tabelas):
+                print("⚠️ ATENÇÃO: Algumas tabelas essenciais estão faltando!")
+                print(f"Tabelas encontradas: {tabelas}")
+                print(f"Tabelas esperadas: {tabelas_essenciais}")
+            else:
+                print("✅ Banco de dados está acessível e com estrutura válida")
+                
+    except Exception as e:
+        print(f"❌ ERRO CRÍTICO NO BANCO DE DADOS: {e}")
+        print("Recomendações:")
+        print("1. Verifique as permissões do arquivo do banco de dados")
+        print("2. Confira se o arquivo não está corrompido")
+        print("3. Execute o comando !iniciar_emergencia se disponível")
+    
+    # Verificações de canal e comandos
+    voice_channel = bot.get_channel(VOICE_COUNTER_CHANNEL_ID)
+    if not voice_channel:
+        print(f"⚠️ Canal de contador de voz (ID: {VOICE_COUNTER_CHANNEL_ID}) não encontrado!")
+    
+    if not verificar_comandos():
+        print("⚠️ Alguns problemas foram encontrados na verificação de comandos!")
+    
+    # Inicia tarefas periódicas
+    try:
+        verificar_periodicamente.start()
+        update_voice_counter.start()
+        clear_cache.start()
+        help_system_cleanup.start()
+        logging.info("✅ Todas as tarefas periódicas iniciadas com sucesso")
+    except RuntimeError as e:
+        logger.error(f"⚠️ Erro ao iniciar tarefas periódicas: {e}")
+    
+    # Status do bot
+    await bot.change_presence(activity=discord.Activity(
+        type=discord.ActivityType.watching,
+        name="digite !f para ajuda"
+    ))
+    print("✅ Status do bot definido com sucesso")
+    print("🟢 Bot totalmente operacional e pronto para uso!")
+
+# ================= INICIALIZAÇÃO FINAL =================
+if __name__ == '__main__':
+    print(f"Tipo do bot confirmado: {type(bot)}")  # Deve mostrar <class '__main__.SafeBot'>
+    load_dotenv()
+    
+    # Validação do token
+    token = os.getenv('DISCORD_TOKEN')
+    if not token:
+        print("❌ ERRO: Token do Discord não encontrado!")
+        print("Crie um arquivo .env com: DISCORD_TOKEN=seu_token_aqui")
+        sys.exit(1)
+    
+    # Inicialização do banco de dados
+    try:
+        init_perm_db()
+        init_db()
+        print("✅ Banco de dados inicializado com sucesso")
+    except Exception as e:
+        print(f"❌ Erro ao inicializar banco de dados: {e}")
+        sys.exit(1)
+    
+    # Execução do bot com tratamento de erros
+    try:
+        print("🚀 Iniciando o bot...")
+        bot.run(token)
+    except discord.LoginFailure:
+        print("❌ ERRO: Token inválido! Verifique o token no arquivo .env")
+    except discord.HTTPException as e:
+        print(f"❌ ERRO HTTP: {e}")
+    except Exception as e:
+        print(f"❌ Erro inesperado: {e}")
+    finally:
+        print("🔄 Bot finalizado")
