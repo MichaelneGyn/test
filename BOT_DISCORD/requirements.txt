@@ -1,0 +1,6 @@
+# Dependências essenciais - Versão para SquareCloud - compatível com Python 3.13
+discord.py>=2.4.0
+python-dotenv==1.0.0
+flask>=2.3.0
+flask-cors>=4.0.0
+audioop-lts

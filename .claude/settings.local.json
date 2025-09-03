@@ -1,0 +1,30 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir:*)",
+      "Bash(cat:*)",
+      "Bash(powershell:*)",
+      "Bash(nslookup:*)",
+      "Bash(ping:*)",
+      "Bash(curl:*)",
+      "Bash(mkdir:*)",
+      "Bash(cp:*)",
+      "Bash(rm:*)",
+      "Bash(grep:*)",
+      "Bash(squarecloud:*)",
+      "Bash(npm install:*)",
+      "Bash(npm run build:*)",
+      "Bash(true)",
+      "Bash(mv:*)",
+      "Bash(npx vite:*)",
+      "mcp__ide__getDiagnostics",
+      "Bash(npm cache clean:*)",
+      "Bash(npm uninstall:*)",
+      "Bash(npm config set:*)",
+      "Bash(npx esbuild --version)",
+      "Bash(npm start)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

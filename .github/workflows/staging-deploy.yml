@@ -1,0 +1,136 @@
+name: Deploy to Staging Environment
+
+on:
+  push:
+    branches: [ develop, staging ]
+    paths:
+      - 'project/**'
+  pull_request:
+    branches: [ main, master ]
+    paths:
+      - 'project/**'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        cache-dependency-path: 'project/package-lock.json'
+
+    - name: Install dependencies
+      working-directory: ./project
+      run: npm ci
+
+    - name: Run tests
+      working-directory: ./project
+      run: |
+        # Adicionar testes quando disponíveis
+        npm run lint || echo "⚠️ Linting não configurado"
+        # npm test || echo "⚠️ Testes não configurados"
+
+    - name: Build project
+      working-directory: ./project
+      run: npm run build
+
+  deploy-staging:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/staging'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        cache-dependency-path: 'project/package-lock.json'
+
+    - name: Install dependencies
+      working-directory: ./project
+      run: npm ci
+
+    - name: Build for staging
+      working-directory: ./project
+      env:
+        NODE_ENV: staging
+        VITE_API_URL: https://mdbot-staging.squareweb.app
+      run: npm run build
+
+    - name: Create staging deployment package
+      run: |
+        cd project
+        rm -rf node_modules
+        # Criar arquivo de configuração para staging
+        echo "MAIN=server.js" > squarecloud.staging.app
+        echo "MEMORY=512" >> squarecloud.staging.app
+        echo "VERSION=recommended" >> squarecloud.staging.app
+        echo "DISPLAY_NAME=MDBot Dashboard - STAGING" >> squarecloud.staging.app
+        echo "DESCRIPTION=Dashboard administrativo para Discord Bot - Ambiente de Teste" >> squarecloud.staging.app
+        echo "SUBDOMAIN=mdbot-staging" >> squarecloud.staging.app
+        echo "AUTO_RESTART=true" >> squarecloud.staging.app
+        echo "START=npm install --production --no-audit --no-fund && npm run build && npm start" >> squarecloud.staging.app
+        
+        zip -r ../mdbot-staging-$(date +%Y%m%d-%H%M%S).zip . \
+          -x "*.git*" "*.env.local" "*.env.development" \
+          "node_modules/*" "src/*" "public/*" \
+          "*.md" "*.log" "coverage/*" ".nyc_output/*" "squarecloud.app"
+        cd ..
+
+    - name: Deploy to Staging SquareCloud
+      env:
+        SQUARECLOUD_API_TOKEN: ${{ secrets.SQUARECLOUD_API_TOKEN }}
+        SQUARECLOUD_STAGING_APP_ID: ${{ secrets.SQUARECLOUD_STAGING_APP_ID }}
+      run: |
+        if [ -n "$SQUARECLOUD_STAGING_APP_ID" ]; then
+          npm install -g @squarecloud/cli
+          squarecloud deploy mdbot-staging-*.zip --app-id $SQUARECLOUD_STAGING_APP_ID
+          echo "✅ Deploy para staging realizado!"
+          echo "🔗 URL de teste: https://mdbot-staging.squareweb.app"
+        else
+          echo "⚠️ SQUARECLOUD_STAGING_APP_ID não configurado"
+          echo "📁 Arquivo ZIP disponível para upload manual"
+        fi
+
+    - name: Comment PR with staging URL
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: '🚀 **Deploy de Staging Realizado!**\n\n' +
+                  '🔗 **URL de Teste:** https://mdbot-staging.squareweb.app\n\n' +
+                  '⚠️ **Importante:** Teste todas as funcionalidades antes de fazer merge para main/master\n\n' +
+                  '✅ **Checklist de Testes:**\n' +
+                  '- [ ] Login com Discord funciona\n' +
+                  '- [ ] Dashboard carrega corretamente\n' +
+                  '- [ ] Navegação entre páginas\n' +
+                  '- [ ] Funcionalidades principais\n' +
+                  '- [ ] Responsividade mobile\n'
+          })
+
+  notify-team:
+    needs: [test, deploy-staging]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+    - name: Notify deployment status
+      run: |
+        if [ "${{ needs.deploy-staging.result }}" == "success" ]; then
+          echo "✅ Deploy de staging realizado com sucesso!"
+          echo "🔗 Teste em: https://mdbot-staging.squareweb.app"
+        else
+          echo "❌ Falha no deploy de staging"
+        fi

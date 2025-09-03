@@ -1,0 +1,65 @@
+name: Deploy to SquareCloud
+
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'project/**'
+      - '.github/workflows/**'
+  pull_request:
+    branches: [ main, master ]
+    paths:
+      - 'project/**'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        cache: 'npm'
+        cache-dependency-path: 'project/package-lock.json'
+
+    - name: Install dependencies
+      working-directory: ./project
+      run: npm ci
+
+    - name: Build production
+      working-directory: ./project
+      run: npm run build:production
+      env:
+        VITE_API_URL: ${{ secrets.VITE_API_URL }}
+        VITE_DISCORD_REDIRECT_URI: ${{ secrets.VITE_DISCORD_REDIRECT_URI }}
+        VITE_DISCORD_CLIENT_ID: ${{ secrets.VITE_DISCORD_CLIENT_ID }}
+
+    - name: Create optimized deployment package
+      run: node scripts/deploy.js production
+
+    - name: Deploy to SquareCloud
+      env:
+        SQUARECLOUD_APP_ID: ${{ secrets.SQUARECLOUD_APP_ID }}
+      run: |
+        # Install SquareCloud CLI
+        npm install -g @squarecloud/cli
+        
+        # Encontrar o arquivo ZIP mais recente
+        LATEST_ZIP=$(ls -t deploy/*.zip | head -1)
+        
+        # Deploy usando CLI com timeout aumentado
+        squarecloud deploy "$LATEST_ZIP" --app-id $SQUARECLOUD_APP_ID --wait --timeout 300000
+
+    - name: Notify deployment status
+      if: always()
+      run: |
+        if [ ${{ job.status }} == 'success' ]; then
+          echo "✅ Deploy realizado com sucesso!"
+        else
+          echo "❌ Falha no deploy"
+        fi

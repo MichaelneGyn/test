@@ -1,0 +1,82 @@
+{
+  "servers": [
+    {
+      "id": "1237217825597161513",
+      "name": "Servidor de douglinhas",
+      "icon": null,
+      "memberCount": 4,
+      "online": true,
+      "features": [
+        "SOUNDBOARD"
+      ],
+      "lastSync": "2025-09-01T10:19:03.469667"
+    },
+    {
+      "id": "1351108597714649108",
+      "name": "FOLK VOLTA JÁ!",
+      "icon": "https://cdn.discordapp.com/icons/1351108597714649108/d6a53931d7c65a3626e3481597d23e9e.png?size=256",
+      "memberCount": 454,
+      "online": true,
+      "features": [
+        "VIDEO_QUALITY_1080_60FPS",
+        "AUDIO_BITRATE_128_KBPS",
+        "AUDIO_BITRATE_256_KBPS",
+        "STAGE_CHANNEL_VIEWERS_50",
+        "VIDEO_QUALITY_720_60FPS",
+        "ANIMATED_BANNER",
+        "MAX_FILE_SIZE_100_MB",
+        "ACTIVITY_FEED_DISABLED_BY_USER",
+        "SOUNDBOARD",
+        "GUILD_TAGS",
+        "AUTO_MODERATION",
+        "COMMUNITY",
+        "NEWS",
+        "ROLE_ICONS",
+        "AUDIO_BITRATE_384_KBPS",
+        "STAGE_CHANNEL_VIEWERS_300",
+        "VANITY_URL",
+        "INVITE_SPLASH",
+        "VIDEO_BITRATE_ENHANCED",
+        "ANIMATED_ICON",
+        "STAGE_CHANNEL_VIEWERS_150",
+        "MAX_FILE_SIZE_50_MB",
+        "TIERLESS_BOOSTING",
+        "ENHANCED_ROLE_COLORS",
+        "TIERLESS_BOOSTING_SYSTEM_MESSAGE",
+        "BANNER"
+      ],
+      "lastSync": "2025-09-01T10:19:03.469667"
+    },
+    {
+      "id": "1387634137384484965",
+      "name": "Bots",
+      "icon": null,
+      "memberCount": 5,
+      "online": true,
+      "features": [
+        "NEWS",
+        "COMMUNITY",
+        "ENABLED_MODERATION_EXPERIENCE_FOR_NON_COMMUNITY"
+      ],
+      "lastSync": "2025-09-01T10:19:03.469667"
+    },
+    {
+      "id": "1391102917796430005",
+      "name": "Nosso cantinho",
+      "icon": null,
+      "memberCount": 3,
+      "online": true,
+      "features": [
+        "SOUNDBOARD"
+      ],
+      "lastSync": "2025-09-01T10:19:03.469667"
+    }
+  ],
+  "settings": {
+    "theme": "dark",
+    "language": "pt-BR",
+    "autoSync": true,
+    "syncInterval": 30000
+  },
+  "lastUpdate": "2025-09-01T13:19:03.474Z"
+}

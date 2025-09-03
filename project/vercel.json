@@ -1,0 +1,71 @@
+{
+  "version": 3,
+  "name": "mdbot-dashboard",
+  "builds": [
+    {
+      "src": "package.json",
+      "use": "@vercel/static-build",
+      "config": {
+        "distDir": "dist",
+        "cleanUrls": true,
+        "trailingSlash": false
+      }
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "/index.html",
+      "headers": {
+        "Cache-Control": "s-maxage=0",
+        "X-Frame-Options": "DENY",
+        "X-Content-Type-Options": "nosniff",
+        "Referrer-Policy": "same-origin",
+        "Permissions-Policy": "geolocation=(), microphone=(), camera=()"
+      }
+    },
+    {
+      "src": "/assets/(.*)",
+      "headers": {
+        "Cache-Control": "public, max-age=31536000, immutable"
+      }
+    },
+    {
+      "src": "/health",
+      "dest": "/health.html",
+      "headers": {
+        "Cache-Control": "no-cache"
+      }
+    }
+  ],
+  "env": {
+    "NODE_ENV": "production"
+  },
+  "build": {
+    "env": {
+      "VITE_API_URL": "@vite_api_url",
+      "VITE_DISCORD_REDIRECT_URI": "@vite_discord_redirect_uri",
+      "VITE_DISCORD_CLIENT_ID": "@vite_discord_client_id"
+    }
+  },
+  "functions": {
+    "app/**": {
+      "maxDuration": 30
+    }
+  },
+  "regions": ["gru1"],
+  "git": {
+    "deploymentEnabled": true,
+    "autoAlias": true,
+    "autoJobCancelation": true
+  },
+  "analytics": {
+    "enable": true
+  },
+  "crons": [
+    {
+      "path": "/api/health",
+      "schedule": "0 */6 * * *"
+    }
+  ]
+}
