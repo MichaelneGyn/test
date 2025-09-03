@@ -356,7 +356,7 @@ export default function ModeracaoContent() {
         
         <div className="border-l-4 border-purple-500 pl-6">
           <h3 className="text-white font-medium mb-4">
-            Membros com algum desses cargos não serão afetados pelo Automod. A Kally, Posse, membros com permissão de administração são imunes por padrão.
+            Membros com algum desses cargos não serão afetados pelo Automod. A MD, Posse, membros com permissão de administração são imunes por padrão.
           </h3>
           
           <div className="mb-4">

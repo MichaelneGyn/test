@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { X } from 'lucide-react';
 
 interface ToggleSwitchProps {
@@ -115,7 +115,7 @@ export default function ConfiguracoesContent() {
               {/* Canais selecionados */}
               <div className="border-l-4 border-purple-500 pl-6">
                 <h3 className="text-white font-medium mb-4">
-                  Os comandos da Kally funcionarão apenas em canais selecionados por você
+                  Os comandos da MD funcionarão apenas em canais selecionados por você
                 </h3>
                 
                 <div className="mb-4">

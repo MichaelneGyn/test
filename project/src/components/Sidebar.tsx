@@ -1,5 +1,6 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
+import { useAuth } from '../contexts/AuthContext';
 import { 
   Home, 
   Settings, 
@@ -28,10 +29,10 @@ import {
 
 interface SidebarProps {
   isCollapsed: boolean;
-  onToggle: () => void;
 }
 
-export default function Sidebar({ isCollapsed, onToggle }: SidebarProps) {
+export default function Sidebar({ isCollapsed }: SidebarProps) {
+  const { user } = useAuth();
   const [expandedSections, setExpandedSections] = useState<string[]>(['GERENCIAMENTO DE SERVIDOR', 'STAFF', 'SOCIAL', 'MISCELLANEOUS']);
   const [searchParams, setSearchParams] = useSearchParams();
   const currentView = searchParams.get('view') || 'overview';
@@ -68,7 +69,7 @@ export default function Sidebar({ isCollapsed, onToggle }: SidebarProps) {
     { icon: Shield, label: 'Moderação', view: 'moderacao' },
     { icon: Users, label: 'Contadores', view: 'contadores' },
     { icon: MessageSquare, label: 'Mensagens', view: 'mensagens' },
-    { icon: AlertTriangle, label: 'Whitelist', view: 'whitelist', badge: 'Update' },
+    { icon: AlertTriangle, label: 'Whitelist', view: 'whitelist' },
     { icon: UserCheck, label: 'Bio Checker', view: 'bio-checker' },
     { icon: Settings, label: 'Utilitários', view: 'utilitarios' },
   ];
@@ -82,7 +83,7 @@ export default function Sidebar({ isCollapsed, onToggle }: SidebarProps) {
 
   const socialItems = [
     { icon: Star, label: 'Primeira Dama', view: 'primeira-dama' },
-    { icon: Camera, label: 'Instagram', view: 'instagram', badge: 'Update' },
+    { icon: Camera, label: 'Instagram', view: 'instagram' },
     { icon: Hash, label: 'Influencers', view: 'influencers' },
     { icon: User, label: 'Tellonym', view: 'tellonym' },
   ];
@@ -96,10 +97,31 @@ export default function Sidebar({ isCollapsed, onToggle }: SidebarProps) {
     <div className={`bg-gray-900 border-r border-gray-800 transition-all duration-300 ${isCollapsed ? 'w-16' : 'w-64'} min-h-screen`}>
       <div className="p-4">
         <div className="flex items-center space-x-2 mb-4">
-          <div className="w-8 h-8 bg-purple-600 rounded-full flex items-center justify-center">
-            <span className="text-white font-bold text-sm">F</span>
-          </div>
-          {!isCollapsed && <span className="text-white font-semibold">FOLK</span>}
+          {user?.avatar ? (
+            <img 
+              src={user.avatar} 
+              alt={user.name}
+              className="w-8 h-8 rounded-full object-cover"
+            />
+          ) : (
+            <div className="w-8 h-8 bg-purple-600 rounded-full flex items-center justify-center">
+              <span className="text-white font-bold text-sm">
+                {user?.name?.charAt(0).toUpperCase() || 'U'}
+              </span>
+            </div>
+          )}
+          {!isCollapsed && (
+            <div className="flex flex-col">
+              <span className="text-white font-semibold text-sm">
+                {user?.name || 'Usuário'}
+              </span>
+              {user?.username && (
+                <span className="text-gray-400 text-xs">
+                  @{user.username}
+                </span>
+              )}
+            </div>
+          )}
         </div>
       </div>
 
@@ -181,9 +203,9 @@ export default function Sidebar({ isCollapsed, onToggle }: SidebarProps) {
                   {!isCollapsed && (
                     <span className="flex-1">{item.label}</span>
                   )}
-                  {item.badge && !isCollapsed && (
+                  {'badge' in item && !isCollapsed && (
                     <span className="ml-2 px-2 py-1 text-xs bg-orange-500 text-white rounded-full">
-                      {item.badge}
+                      {String(item.badge)}
                     </span>
                   )}
                 </button>
@@ -254,9 +276,9 @@ export default function Sidebar({ isCollapsed, onToggle }: SidebarProps) {
                   {!isCollapsed && (
                     <span className="flex-1">{item.label}</span>
                   )}
-                  {item.badge && !isCollapsed && (
+                  {'badge' in item && !isCollapsed && (
                     <span className="ml-2 px-2 py-1 text-xs bg-orange-500 text-white rounded-full">
-                      {item.badge}
+                      {String(item.badge)}
                     </span>
                   )}
                 </button>

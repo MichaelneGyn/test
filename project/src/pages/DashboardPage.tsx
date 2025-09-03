@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { Routes, Route, Navigate, Link, useSearchParams } from 'react-router-dom';
+import { useState } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import Sidebar from '../components/Sidebar';
 import LogsEventosContent from '../components/LogsEventosContent';
@@ -28,17 +28,13 @@ import RegistroContent from '../components/RegistroContent';
 import TellonymContent from '../components/TellonymContent';
 import TicketsContent from '../components/TicketsContent';
 import VipsContent from '../components/VipsContent';
-import { Home, Settings, Users, BarChart3 } from 'lucide-react';
 
 export default function DashboardPage() {
   const { user } = useAuth();
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [searchParams, setSearchParams] = useSearchParams();
+  const [sidebarCollapsed] = useState(false);
+  const [searchParams] = useSearchParams();
   const currentView = searchParams.get('view') || 'overview';
 
-  const setCurrentView = (view: string) => {
-    setSearchParams({ view });
-  };
 
   if (!user) {
     return (
@@ -65,7 +61,6 @@ export default function DashboardPage() {
     <div className="flex min-h-screen bg-gray-900">
       <Sidebar 
         isCollapsed={sidebarCollapsed} 
-        onToggle={() => setSidebarCollapsed(!sidebarCollapsed)} 
       />
       
       <div className="flex-1 bg-gray-900 min-h-screen">

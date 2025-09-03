@@ -39,7 +39,8 @@
     }
   ],
   "env": {
-    "NODE_ENV": "production"
+    "NODE_ENV": "production",
+    "SQUARECLOUD_APP_ID": "41b7855eefc14ec2b012beb3c9e60c54"
   },
   "build": {
     "env": {

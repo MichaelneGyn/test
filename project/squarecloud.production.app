@@ -6,7 +6,7 @@ DISPLAY_NAME=MDBot Dashboard
 DESCRIPTION=Dashboard administrativo para Discord Bot com sistema de tickets
 SUBDOMAIN=mdbot-dashboard
 AUTO_RESTART=true
-START=npm install --production --no-audit --no-fund && npm run build:production && npm start
+START=npm install --no-audit --no-fund && cd /application && npm run build:production && npm start
 
 # Variáveis de ambiente para produção
 NODE_ENV=production

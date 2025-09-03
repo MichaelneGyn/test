@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { Search, ChevronDown, X, Image, ArrowLeft, Settings, Eye, Trash2 } from 'lucide-react';
 
 interface DropdownOption {
@@ -179,7 +179,7 @@ export default function TicketsContent() {
   const [activeComponentTab, setActiveComponentTab] = useState('botoes');
 
   // Estados para painéis
-  const [paineis, setPaineis] = useState([
+  const [paineis] = useState([
     { id: 'folk', name: 'FOLK' },
     { id: 'be-a-member', name: 'BE A MEMBER' }
   ]);
@@ -192,7 +192,7 @@ export default function TicketsContent() {
   // Estados para o embed
   const [embedData, setEmbedData] = useState({
     cor: '#8b5cf6',
-    autorNome: 'KALLY',
+    autorNome: 'MD',
     autorLink: '',
     titulo: 'Título',
     tituloLink: '',
@@ -349,7 +349,7 @@ export default function TicketsContent() {
                   </div>
                   <div>
                     <div className="flex items-center space-x-2">
-                      <span className="text-white font-medium">KALLY</span>
+                      <span className="text-white font-medium">MD</span>
                       <span className="bg-blue-600 text-white px-2 py-1 rounded text-xs">BOT</span>
                     </div>
                     <span className="text-gray-400 text-xs">Hoje às 11:12</span>

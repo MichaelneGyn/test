@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { Bot, Menu, X, User } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
@@ -73,14 +73,7 @@ export default function Navbar() {
                   <User className="w-5 h-5 text-gray-300" />
                 </div>
               </div>
-            ) : (
-              <Link
-                to="/login"
-                className="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-md text-sm font-medium transition-colors inline-block"
-              >
-                Login
-              </Link>
-            )}
+            ) : null}
           </div>
 
           {/* Mobile menu button */}
@@ -146,15 +139,7 @@ export default function Navbar() {
                   Sair
                 </button>
               </>
-            ) : (
-              <Link
-                to="/login"
-                className="text-gray-300 hover:text-white block px-3 py-2 rounded-md text-base font-medium"
-                onClick={() => setIsOpen(false)}
-              >
-                Login
-              </Link>
-            )}
+            ) : null}
           </div>
         </div>
       )}

@@ -352,7 +352,7 @@ export default function WhitelistContent() {
                   </div>
                   <div>
                     <div className="flex items-center space-x-2">
-                      <span className="text-white font-medium">KALLY</span>
+                      <span className="text-white font-medium">MD</span>
                       <span className="bg-blue-600 text-white px-2 py-1 rounded text-xs">BOT</span>
                     </div>
                     <span className="text-gray-400 text-xs">Hoje às 09:08</span>
