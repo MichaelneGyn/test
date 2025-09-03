@@ -2,64 +2,67 @@ name: Deploy to SquareCloud
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [main, master]
     paths:
-      - 'project/**'
-      - '.github/workflows/**'
+      - "project/**"
+      - ".github/workflows/**"
   pull_request:
-    branches: [ main, master ]
+    branches: [main, master]
     paths:
-      - 'project/**'
+      - "project/**"
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
-    
+
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    - name: Setup Node.js
-      uses: actions/setup-node@v4
-      with:
-        node-version: '20'
-        cache: 'npm'
-        cache-dependency-path: 'project/package-lock.json'
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+          cache: "npm"
+          cache-dependency-path: "project/package-lock.json"
 
-    - name: Install dependencies
-      working-directory: ./project
-      run: npm ci
+      - name: Install dependencies
+        working-directory: ./project
+        run: npm ci
 
-    - name: Build production
-      working-directory: ./project
-      run: npm run build:production
-      env:
-        VITE_API_URL: ${{ secrets.VITE_API_URL }}
-        VITE_DISCORD_REDIRECT_URI: ${{ secrets.VITE_DISCORD_REDIRECT_URI }}
-        VITE_DISCORD_CLIENT_ID: ${{ secrets.VITE_DISCORD_CLIENT_ID }}
+      - name: Build project
+        working-directory: ./project
+        run: npm run build
 
-    - name: Create optimized deployment package
-      run: node scripts/deploy.js production
+      - name: Create deployment package
+        run: |
+          cd project
+          # Remove node_modules to reduce size
+          rm -rf node_modules
+          # Create zip with only necessary files
+          zip -r ../mdbot-deploy-$(date +%Y%m%d-%H%M%S).zip . \
+            -x "*.git*" "*.env.local" "*.env.development" \
+            "node_modules/*" "src/*" "public/*" \
+            "*.md" "*.log" "coverage/*" ".nyc_output/*"
+          cd ..
 
-    - name: Deploy to SquareCloud
-      env:
-        SQUARECLOUD_APP_ID: ${{ secrets.SQUARECLOUD_APP_ID }}
-      run: |
-        # Install SquareCloud CLI
-        npm install -g @squarecloud/cli
-        
-        # Encontrar o arquivo ZIP mais recente
-        LATEST_ZIP=$(ls -t deploy/*.zip | head -1)
-        
-        # Deploy usando CLI com timeout aumentado
-        squarecloud deploy "$LATEST_ZIP" --app-id $SQUARECLOUD_APP_ID --wait --timeout 300000
+      - name: Deploy to SquareCloud
+        env:
+          SQUARECLOUD_API_TOKEN: ${{ secrets.SQUARECLOUD_API_TOKEN }}
+          SQUARECLOUD_APP_ID: ${{ secrets.SQUARECLOUD_APP_ID }}
+        run: |
+          # Install SquareCloud CLI
+          npm install -g @squarecloud/cli
 
-    - name: Notify deployment status
-      if: always()
-      run: |
-        if [ ${{ job.status }} == 'success' ]; then
-          echo "✅ Deploy realizado com sucesso!"
-        else
-          echo "❌ Falha no deploy"
-        fi
+          # Deploy using CLI
+          squarecloud deploy mdbot-deploy-*.zip --app-id $SQUARECLOUD_APP_ID
+
+      - name: Notify deployment status
+        if: always()
+        run: |
+          if [ ${{ job.status }} == 'success' ]; then
+            echo "✅ Deploy realizado com sucesso!"
+          else
+            echo "❌ Falha no deploy"
+          fi

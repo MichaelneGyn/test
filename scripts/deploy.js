@@ -105,6 +105,15 @@ class SquareCloudDeployer {
         'server.js',
         'package.json',
         'package-lock.json',
+        'index.html',
+        'vite.config.ts',
+        'tsconfig.json',
+        'tsconfig.app.json',
+        'tsconfig.node.json',
+        'tailwind.config.js',
+        'postcss.config.js',
+        'src',
+        'public',
         `squarecloud.${this.environment}.app`,
         '.env.production'
       ];
@@ -162,13 +171,27 @@ START=npm install --production --no-audit --no-fund && npm run build:${this.envi
         return;
       }
 
-      console.log(`🌐 Fazendo deploy para SquareCloud (${this.environment})...`);
-      execSync(`squarecloud deploy "${zipPath}" --app-id ${appId} --wait`, { stdio: 'inherit', timeout: 300000 });
+      // Tentar usar o CLI, mas preparar para fallback para upload manual
+      try {
+        console.log(`🌐 Tentando deploy automático para SquareCloud (${this.environment})...`);
+        execSync(`squarecloud app commit --file "${zipPath}" -r`, { stdio: 'pipe', timeout: 10000 });
+        console.log(`✅ Deploy automático concluído com sucesso!`);
+      } catch (cliError) {
+        // Se falhar com o CLI, fornecer instruções claras para upload manual
+        console.log(`⚠️  Deploy automático falhou. Siga as instruções para upload manual:`);
+        console.log(`📁 1. Acesse o arquivo ZIP em: ${zipPath}`);
+        console.log(`🌐 2. Faça login no painel do SquareCloud: https://squarecloud.app/dashboard`);
+        console.log(`📤 3. Selecione seu aplicativo e faça upload do arquivo ZIP`);
+        console.log(`🔄 4. Reinicie o aplicativo após o upload`);
+      }
       
     } catch (error) {
       console.log('⚠️  SquareCloud CLI não encontrado ou erro no deploy automático.');
       console.log(`📁 Arquivo ZIP disponível em: ${zipPath}`);
-      console.log('💡 Faça upload manual no painel do SquareCloud.');
+      console.log('💡 Faça upload manual no painel do SquareCloud:');
+      console.log(`🌐 1. Acesse: https://squarecloud.app/dashboard`);
+      console.log(`📤 2. Selecione seu aplicativo e faça upload do arquivo ZIP`);
+      console.log(`🔄 3. Reinicie o aplicativo após o upload`);
       if (error.message && !error.message.includes('squarecloud')) {
         console.log(`❌ Erro: ${error.message}`);
       }

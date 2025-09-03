@@ -55,8 +55,7 @@ function createSquareCloudPackage() {
     'server.js',
     'squarecloud.app',
     '.env',
-    '.npmrc',
-    'redirect-dashboard.html'
+    '.npmrc'
   ];
   
   essentialFiles.forEach(file => {
